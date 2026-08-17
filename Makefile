@@ -2,7 +2,7 @@ BUILD_DIR := build
 SOURCE_DIR := src
 
 LIBTRPAK_REPOSITORY := https://github.com/alexishida/libtrpak.git
-LIBTRPAK_COMMIT := eb740fc2ab602c1be6e541ce8bd85c7026eb478e
+LIBTRPAK_COMMIT := 22aa35fb928247686b0f9dbcdf3f901768c96d70
 LIBTRPAK_DIR := .deps/libtrpak
 LIBTRPAK_STAMP := $(LIBTRPAK_DIR)/.checked-out-$(LIBTRPAK_COMMIT)
 

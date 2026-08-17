@@ -1,3 +1,14 @@
+/*
+ * GB Transfer Dumper - Nintendo 64 Homebrew
+ *
+ * This application dumps and restores Game Boy cartridges through the
+ * Nintendo 64 Transfer Pak.
+ *
+ * Author: Alex Ishida
+ * Version: 2.0
+ * License: MIT
+ */
+
 #include <libdragon.h>
 
 #include <errno.h>
@@ -6,20 +17,51 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <dir.h>
+#include <stdarg.h>
 
 #include "libtrpak.h"
 
-#define APP_NAME "GB Transfer Dumper"
-#define DUMP_DIRECTORY "sd:/gbdump"
-#define IO_BUFFER_SIZE 512u
-#define MENU_ITEM_COUNT 5
+/* ============================================================================
+ * DEFINITIONS AND CONSTANTS
+ * ============================================================================ */
 
-#define APP_ERR_SD_MOUNT       (-100)
-#define APP_ERR_SD_DIRECTORY   (-101)
-#define APP_ERR_FILE_OPEN      (-102)
-#define APP_ERR_FILE_WRITE     (-103)
-#define APP_ERR_FILE_CLOSE     (-104)
-#define APP_ERR_NAME_EXHAUSTED (-105)
+#define APP_NAME           "GB Transfer Dumper"
+#define APP_AUTHOR         "Alex Ishida"
+#define APP_VERSION        "1.0"
+#define ROM_DUMP_DIRECTORY "sd:/romdump"
+#define SAVE_DUMP_DIRECTORY "sd:/savedump"
+#define DUMP_DIRECTORY_FALLBACK "sd:/"
+#define IO_BUFFER_SIZE     4096
+#define MENU_ITEM_COUNT    5
+
+/* Application error codes */
+#define APP_ERR_SD_MOUNT           (-100)
+#define APP_ERR_SD_DIRECTORY       (-101)
+#define APP_ERR_FILE_OPEN          (-102)
+#define APP_ERR_FILE_WRITE         (-103)
+#define APP_ERR_FILE_CLOSE         (-104)
+#define APP_ERR_NAME_EXHAUSTED     (-105)
+#define APP_ERR_INVALID_PARAM      (-106)
+#define APP_ERR_FILE_READ          (-107)
+#define APP_ERR_FILE_NOT_FOUND     (-108)
+#define APP_ERR_FILE_SIZE_MISMATCH (-109)
+#define APP_ERR_CANCELLED          (-110)
+#define APP_ERR_TIMEOUT            (-111)
+
+/* Timeouts and configuration */
+#define OPERATION_TIMEOUT_MS       5000
+#define STATUS_CACHE_DURATION_MS   50
+
+/* Debug levels */
+#define DEBUG_LEVEL_NONE     0
+#define DEBUG_LEVEL_ERROR    1
+#define DEBUG_LEVEL_INFO     2
+#define DEBUG_LEVEL_VERBOSE  3
+
+/* ============================================================================
+ * TYPES AND STRUCTURES
+ * ============================================================================ */
 
 typedef enum menu_item {
     MENU_INFO = 0,
@@ -29,17 +71,84 @@ typedef enum menu_item {
     MENU_EXIT
 } menu_item;
 
+typedef struct {
+    uint8_t last_status;
+    uint32_t last_poll_time;
+    bool is_cached;
+    uint32_t cache_duration_ms;
+} status_cache_t;
+
+/* ============================================================================
+ * GLOBAL VARIABLES
+ * ============================================================================ */
+
 static const char *const menu_labels[MENU_ITEM_COUNT] = {
     "Info",
-    "Save ROM",
-    "Save RAM",
-    "Restore RAM (off)",
+    "Dump ROM",
+    "Backup Save",
+    "Restore Save",
     "Exit"
 };
 
 static bool sd_ready;
 static bool cart_active;
 static bool cart_known;
+static const char *rom_dump_directory = DUMP_DIRECTORY_FALLBACK;
+static const char *save_dump_directory = DUMP_DIRECTORY_FALLBACK;
+#ifdef ENABLE_DEBUG
+static int debug_level = DEBUG_LEVEL_INFO;
+#endif
+static status_cache_t status_cache = {
+    .cache_duration_ms = STATUS_CACHE_DURATION_MS
+};
+
+/* ============================================================================
+ * DEBUG FUNCTIONS
+ * ============================================================================ */
+
+static void debug_log(int level, const char *format, ...)
+{
+    #ifdef ENABLE_DEBUG
+    if (level <= debug_level) {
+        va_list args;
+        va_start(args, format);
+
+        const char *level_str;
+        switch (level) {
+            case DEBUG_LEVEL_ERROR: level_str = "ERROR"; break;
+            case DEBUG_LEVEL_INFO: level_str = "INFO"; break;
+            case DEBUG_LEVEL_VERBOSE: level_str = "VERBOSE"; break;
+            default: level_str = "UNKNOWN"; break;
+        }
+
+        debugf("[%s] ", level_str);
+        vdebugf(format, args);
+        va_end(args);
+    }
+    #endif
+}
+
+/* ============================================================================
+ * HELPER FUNCTIONS
+ * ============================================================================ */
+
+static const char *system_name(void)
+{
+    if (trcart.gbc == 0xC0u) {
+        return "Game Boy Color";
+    }
+    return trcart.gbc == 0x80u ? "Game Boy / Color" : "Game Boy";
+}
+
+static const char *yes_no(bool value)
+{
+    return value ? "Detected" : "--";
+}
+
+static const char *cartridge_title(void)
+{
+    return trcart.title[0] != '\0' ? trcart.title : "Untitled cartridge";
+}
 
 static const char *mapper_name(uint8_t mapper)
 {
@@ -59,17 +168,45 @@ static const char *mapper_name(uint8_t mapper)
     }
 }
 
+/* ============================================================================
+ * ERROR MESSAGES
+ * ============================================================================ */
+
 static const char *app_error_string(int result)
 {
     switch (result) {
-    case APP_ERR_SD_MOUNT: return "nao foi possivel montar o microSD";
-    case APP_ERR_SD_DIRECTORY: return "nao foi possivel criar /gbdump";
-    case APP_ERR_FILE_OPEN: return "nao foi possivel criar o arquivo";
-    case APP_ERR_FILE_WRITE: return "erro ao gravar no microSD";
-    case APP_ERR_FILE_CLOSE: return "erro ao finalizar o arquivo";
-    case APP_ERR_NAME_EXHAUSTED: return "nao ha nome de arquivo disponivel";
-    default: return trpak_error_string(result);
+        case APP_ERR_SD_MOUNT: return "Unable to mount microSD";
+        case APP_ERR_SD_DIRECTORY: return "Unable to create /gbdump directory";
+        case APP_ERR_FILE_OPEN: return "Unable to create file";
+        case APP_ERR_FILE_WRITE: return "Error writing to microSD";
+        case APP_ERR_FILE_CLOSE: return "Error closing file";
+        case APP_ERR_NAME_EXHAUSTED: return "No available filename";
+        case APP_ERR_INVALID_PARAM: return "Invalid parameter";
+        case APP_ERR_FILE_READ: return "Error reading from microSD";
+        case APP_ERR_FILE_NOT_FOUND: return "File not found";
+        case APP_ERR_FILE_SIZE_MISMATCH: return "File size mismatch";
+        case APP_ERR_CANCELLED: return "Operation cancelled";
+        case APP_ERR_TIMEOUT: return "Operation timeout";
+        default: return trpak_error_string(result);
     }
+}
+
+/* ============================================================================
+ * INTERFACE FUNCTIONS
+ * ============================================================================ */
+
+static void draw_header(void)
+{
+    printf("+--------------------------------------+\n");
+    printf("| %-21s PAK: %-9s |\n", APP_NAME,
+           cart_active ? "CONNECTED" : "CHECK");
+    printf("+--------------------------------------+\n");
+}
+
+static void draw_footer(const char *controls)
+{
+    printf("\n%s\n", controls);
+    printf("%s | SC64 + Transfer Pak v%s\n", APP_AUTHOR, APP_VERSION);
 }
 
 static void wait_for_ack(void)
@@ -89,41 +226,142 @@ static void show_message(const char *title, const char *line1,
                          const char *line2)
 {
     console_clear();
-    printf("%s\n\n", APP_NAME);
-    printf("%s\n\n", title);
+    draw_header();
+    printf("\n%s\n", title);
+    printf("------------------------------------------\n");
     if (line1 != NULL) {
         printf("%s\n", line1);
     }
     if (line2 != NULL) {
         printf("%s\n", line2);
     }
-    printf("\nA/B: voltar\n");
+    draw_footer("A / B / START: continue");
     console_render();
     wait_for_ack();
 }
+
+static bool confirm_action(const char *title, const char *line1,
+                           const char *line2)
+{
+    console_clear();
+    draw_header();
+    printf("\n%s\n", title);
+    printf("------------------------------------------\n");
+    printf("%s\n", line1);
+    if (line2 != NULL) {
+        printf("%s\n", line2);
+    }
+    draw_footer("A: confirm     B: cancel");
+    console_render();
+
+    for (;;) {
+        joypad_buttons_t pressed;
+        joypad_poll();
+        pressed = joypad_get_buttons_pressed(JOYPAD_PORT_1);
+        if (pressed.a || pressed.start) {
+            return true;
+        }
+        if (pressed.b) {
+            return false;
+        }
+        wait_ms(16);
+    }
+}
+
+/* ============================================================================
+ * HARDWARE FUNCTIONS
+ * ============================================================================ */
 
 static void shutdown_cartridge(void)
 {
     if (cart_active) {
         (void)trpak_shutdown();
         cart_active = false;
+        debug_log(DEBUG_LEVEL_INFO, "Cartridge powered down\n");
     }
+}
+
+static int get_cached_status(uint8_t *status, bool force_refresh)
+{
+    uint32_t now = timer_ticks();
+
+    if (!force_refresh && status_cache.is_cached &&
+        (now - status_cache.last_poll_time) < status_cache.cache_duration_ms) {
+        *status = status_cache.last_status;
+        return TRPAK_OK;
+    }
+
+    int result = trpak_get_status(&status_cache.last_status);
+    if (result == TRPAK_OK) {
+        status_cache.is_cached = true;
+        status_cache.last_poll_time = now;
+        *status = status_cache.last_status;
+        debug_log(DEBUG_LEVEL_VERBOSE, "Status cache updated: 0x%02X\n",
+                 status_cache.last_status);
+    }
+    return result;
+}
+
+static int cartridge_ready_with_timeout(uint32_t timeout_ms)
+{
+    uint32_t start_time = timer_ticks();
+    uint8_t status;
+    int result;
+
+    while ((timer_ticks() - start_time) < timeout_ms) {
+        result = get_cached_status(&status, false);
+        if (result != TRPAK_OK) {
+            debug_log(DEBUG_LEVEL_VERBOSE, "Status query failed: %d\n", result);
+            return result;
+        }
+
+        if ((status & TRPAK_STATUS_REMOVED) != 0u) {
+            debug_log(DEBUG_LEVEL_ERROR, "Cartridge removed\n");
+            return TRPAK_ERR_NO_CARTRIDGE;
+        }
+        if ((status & TRPAK_STATUS_POWERED) == 0u) {
+            debug_log(DEBUG_LEVEL_VERBOSE, "Cartridge not powered\n");
+            return TRPAK_ERR_POWER_OFF;
+        }
+        if ((status & TRPAK_STATUS_READY) != 0u &&
+            (status & TRPAK_STATUS_IS_RESETTING) == 0u) {
+            debug_log(DEBUG_LEVEL_VERBOSE, "Cartridge ready\n");
+            return TRPAK_OK;
+        }
+        wait_ms(10);
+    }
+
+    debug_log(DEBUG_LEVEL_ERROR, "Cartridge ready timeout\n");
+    return APP_ERR_TIMEOUT;
+}
+
+static int cartridge_ready(void)
+{
+    return cartridge_ready_with_timeout(OPERATION_TIMEOUT_MS);
 }
 
 static int refresh_cartridge(void)
 {
     shutdown_cartridge();
+    status_cache.is_cached = false;
 
     int result = trpak_init();
     if (result == TRPAK_OK) {
         cart_active = true;
         cart_known = true;
+        debug_log(DEBUG_LEVEL_INFO, "Cartridge initialized: %s\n",
+                 cartridge_title());
     } else {
         cart_active = false;
         cart_known = false;
+        debug_log(DEBUG_LEVEL_ERROR, "Cartridge init failed: %d\n", result);
     }
     return result;
 }
+
+/* ============================================================================
+ * FILE FUNCTIONS
+ * ============================================================================ */
 
 static int ensure_sd(void)
 {
@@ -132,35 +370,65 @@ static int ensure_sd(void)
     }
 
     sd_ready = debug_init_sdfs("sd:/", -1);
+    if (sd_ready) {
+        debug_log(DEBUG_LEVEL_INFO, "SD card mounted successfully\n");
+    } else {
+        debug_log(DEBUG_LEVEL_ERROR, "Failed to mount SD card\n");
+    }
     return sd_ready ? TRPAK_OK : APP_ERR_SD_MOUNT;
 }
 
-static int ensure_dump_directory(void)
+static int ensure_dump_directory(bool save_ram)
 {
+    struct stat status;
+    const char *directory = save_ram ? SAVE_DUMP_DIRECTORY : ROM_DUMP_DIRECTORY;
+    const char **active_directory = save_ram
+        ? &save_dump_directory : &rom_dump_directory;
     int result = ensure_sd();
     if (result != TRPAK_OK) {
         return result;
     }
 
-    errno = 0;
-    if (mkdir(DUMP_DIRECTORY, 0777) != 0 && errno != EEXIST) {
+    if (stat(directory, &status) == 0) {
+        if (S_ISDIR(status.st_mode)) {
+            *active_directory = directory;
+            return TRPAK_OK;
+        }
+        debug_log(DEBUG_LEVEL_ERROR,
+                 "Dump path exists but is not a directory: %s\n", directory);
         return APP_ERR_SD_DIRECTORY;
     }
-    return TRPAK_OK;
+
+    if (errno == ENOENT || errno == 0) {
+        *active_directory = DUMP_DIRECTORY_FALLBACK;
+        debug_log(DEBUG_LEVEL_INFO,
+                 "%s does not exist; writing to %s\n",
+                 directory, *active_directory);
+        return TRPAK_OK;
+    }
+
+    debug_log(DEBUG_LEVEL_ERROR, "Unable to inspect directory %s: %s\n",
+             directory, strerror(errno));
+    return APP_ERR_SD_DIRECTORY;
 }
 
 static void safe_title(char output[32])
 {
+    memset(output, 0, 32);
+
     size_t write_index = 0u;
     size_t i;
 
     for (i = 0u; i < sizeof(trcart.title) && trcart.title[i] != '\0'; i++) {
+        if (write_index >= 31u) break;
+
         unsigned char value = (unsigned char)trcart.title[i];
         char sanitized;
 
         if ((value >= 'A' && value <= 'Z') ||
             (value >= 'a' && value <= 'z') ||
-            (value >= '0' && value <= '9') || value == '-' || value == '_') {
+            (value >= '0' && value <= '9') ||
+            value == '-' || value == '_') {
             sanitized = (char)value;
         } else if (value == ' ') {
             sanitized = '_';
@@ -178,11 +446,15 @@ static void safe_title(char output[32])
     while (write_index > 0u && output[write_index - 1u] == '_') {
         write_index--;
     }
+
     if (write_index == 0u) {
         memcpy(output, "cartridge", sizeof("cartridge"));
     } else {
         output[write_index] = '\0';
     }
+
+    output[31] = '\0';
+    debug_log(DEBUG_LEVEL_VERBOSE, "Sanitized title: %s\n", output);
 }
 
 static int path_exists(const char *path, bool *exists)
@@ -201,7 +473,8 @@ static int path_exists(const char *path, bool *exists)
     return APP_ERR_FILE_OPEN;
 }
 
-static int open_unique_file(const char *extension, char path[128], FILE **file)
+static int open_unique_file(const char *directory, const char *extension,
+                            char path[128], FILE **file)
 {
     char title[32];
     unsigned int suffix;
@@ -212,108 +485,225 @@ static int open_unique_file(const char *extension, char path[128], FILE **file)
     for (suffix = 0u; suffix <= 99u; suffix++) {
         bool exists;
         int length;
+        const char *separator = directory[strlen(directory) - 1u] == '/'
+            ? "" : "/";
         if (suffix == 0u) {
-            length = snprintf(path, 128, "%s/%s.%s",
-                              DUMP_DIRECTORY, title, extension);
+            length = snprintf(path, 128, "%s%s%s.%s",
+                              directory, separator, title, extension);
         } else {
-            length = snprintf(path, 128, "%s/%s-%02u.%s",
-                              DUMP_DIRECTORY, title, suffix, extension);
+            length = snprintf(path, 128, "%s%s%s-%02u.%s",
+                              directory, separator, title, suffix, extension);
         }
         if (length < 0 || length >= 128) {
+            debug_log(DEBUG_LEVEL_ERROR, "Path truncation: %d\n", length);
             return APP_ERR_FILE_OPEN;
         }
+
         int result = path_exists(path, &exists);
         if (result != TRPAK_OK) {
             return result;
         }
         if (exists) {
+            debug_log(DEBUG_LEVEL_VERBOSE, "File exists: %s\n", path);
             continue;
         }
 
         *file = fopen(path, "wb");
-        return *file != NULL ? TRPAK_OK : APP_ERR_FILE_OPEN;
+        if (*file != NULL) {
+            debug_log(DEBUG_LEVEL_INFO, "Created file: %s\n", path);
+            return TRPAK_OK;
+        }
+        return APP_ERR_FILE_OPEN;
     }
     return APP_ERR_NAME_EXHAUSTED;
 }
 
-static int cartridge_ready(void)
+static bool select_restore_file(const char *directory, char *path,
+                                size_t path_size)
 {
-    uint8_t status;
-    int result = trpak_get_status(&status);
+    dir_t entry;
+    int result = dir_findfirst(directory, &entry);
 
-    if (result != TRPAK_OK) {
-        return result;
+    while (result == 0) {
+        if (entry.d_type == DT_REG && strstr(entry.d_name, ".sav")) {
+            size_t directory_length = strlen(directory);
+            size_t name_length = strlen(entry.d_name);
+            bool needs_separator = directory[directory_length - 1u] != '/';
+            if (name_length + directory_length + (needs_separator ? 2u : 1u) > path_size) {
+                result = dir_findnext(directory, &entry);
+                continue;
+            }
+            memcpy(path, directory, directory_length);
+            if (needs_separator) {
+                path[directory_length++] = '/';
+            }
+            memcpy(&path[directory_length], entry.d_name,
+                   name_length + 1u);
+            debug_log(DEBUG_LEVEL_INFO, "Selected restore file: %s\n", path);
+            return true;
+        }
+        result = dir_findnext(directory, &entry);
     }
-    if ((status & TRPAK_STATUS_REMOVED) != 0u) {
-        return TRPAK_ERR_NO_CARTRIDGE;
+
+    debug_log(DEBUG_LEVEL_INFO, "No .sav files found in %s\n", directory);
+    return false;
+}
+
+static int validate_restore_file(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        debug_log(DEBUG_LEVEL_ERROR, "Restore file not found: %s\n", path);
+        return APP_ERR_FILE_NOT_FOUND;
     }
-    if ((status & TRPAK_STATUS_POWERED) == 0u) {
-        return TRPAK_ERR_POWER_OFF;
+    if (st.st_size != trcart.ramsize) {
+        debug_log(DEBUG_LEVEL_ERROR, "File size mismatch: %zu vs %zu\n",
+                 st.st_size, trcart.ramsize);
+        return APP_ERR_FILE_SIZE_MISMATCH;
     }
-    if ((status & TRPAK_STATUS_READY) == 0u ||
-        (status & TRPAK_STATUS_IS_RESETTING) != 0u) {
-        return TRPAK_ERR_ACCESS_STATE;
+    debug_log(DEBUG_LEVEL_INFO, "Restore file validated: %s (%zu bytes)\n",
+             path, st.st_size);
+    return TRPAK_OK;
+}
+
+static int safe_flush_buffer(FILE *file, const uint8_t *buffer, size_t size)
+{
+    if (!file || !buffer) {
+        debug_log(DEBUG_LEVEL_ERROR, "Invalid parameters to flush_buffer\n");
+        return APP_ERR_INVALID_PARAM;
+    }
+    if (size == 0u) {
+        return TRPAK_OK;
+    }
+
+    size_t written = fwrite(buffer, 1u, size, file);
+    if (written != size) {
+        debug_log(DEBUG_LEVEL_ERROR, "fwrite failed: wrote %zu of %zu bytes\n",
+                 written, size);
+        return APP_ERR_FILE_WRITE;
     }
     return TRPAK_OK;
 }
 
-static int flush_buffer(FILE *file, const uint8_t *buffer, size_t size)
+/* ============================================================================
+ * PROGRESS AND VALIDATION FUNCTIONS
+ * ============================================================================ */
+
+static uint32_t calculate_crc32(const uint8_t *data, size_t size)
 {
-    if (size == 0u) {
-        return TRPAK_OK;
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < size; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
     }
-    return fwrite(buffer, 1u, size, file) == size
-        ? TRPAK_OK
-        : APP_ERR_FILE_WRITE;
+    return ~crc;
 }
 
 static void draw_progress(const char *operation, const char *path,
-                          size_t done, size_t total)
+                          size_t done, size_t total, uint32_t elapsed_ms)
 {
+    char bar[21];
+    unsigned int filled;
+    unsigned int index;
     unsigned long percent = total == 0u
         ? 0u
         : (unsigned long)((done * 100u) / total);
 
+    filled = (unsigned int)((percent * 20u) / 100u);
+    if (filled > 20u) {
+        filled = 20u;
+    }
+    for (index = 0u; index < 20u; index++) {
+        bar[index] = index < filled ? '#' : '-';
+    }
+    bar[20] = '\0';
+
+    /* Calculate transfer speed and remaining time. */
+    float rate_kb_s = 0.0f;
+    uint32_t remaining_ms = 0;
+    if (done > 0 && elapsed_ms > 0) {
+        float rate = (float)done / elapsed_ms;  /* bytes/ms */
+        rate_kb_s = rate * 1000.0f / 1024.0f;   /* KiB/s */
+        remaining_ms = (uint32_t)((total - done) / rate);
+    }
+
     console_clear();
-    printf("%s\n\n", APP_NAME);
-    printf("%s\n", operation);
-    printf("%s\n\n", path);
-    printf("%lu / %lu KiB  (%lu%%)\n",
+    draw_header();
+    printf("\n%s\n\n", operation);
+    printf("%s\n", cartridge_title());
+    printf("[%s] %3lu%%\n\n", bar, percent);
+    printf("%lu / %lu KiB\n",
            (unsigned long)(done / 1024u),
-           (unsigned long)(total / 1024u),
-           percent);
-    printf("\nNao remova a fita ou o Transfer Pak.\n");
+           (unsigned long)(total / 1024u));
+
+    if (rate_kb_s > 0.0f) {
+        printf("Speed: %.1f KiB/s\n", rate_kb_s);
+        printf("Remaining: %02lu:%02lu\n",
+               (unsigned long)(remaining_ms / 60000u),
+               (unsigned long)((remaining_ms % 60000u) / 1000u));
+    }
+
+    printf("File: %s\n", path);
+    printf("\nDo not remove the cartridge or Transfer Pak.\n");
+    draw_footer("Please wait...");
     console_render();
 }
 
+/* ============================================================================
+ * DUMP FUNCTIONS
+ * ============================================================================ */
+
 static int dump_rom_stream(FILE *file, const char *path, size_t *bytes_written)
 {
-    uint8_t io_buffer[IO_BUFFER_SIZE];
+    uint8_t *io_buffer = NULL;
+    size_t buffer_size = IO_BUFFER_SIZE;
     size_t buffered = 0u;
     size_t total = 0u;
     uint16_t bank;
     int result = TRPAK_OK;
+    uint32_t start_time = timer_ticks();
+    uint32_t checksum = 0;
 
     *bytes_written = 0u;
 
+    /* Allocate transfer buffer. */
+    io_buffer = malloc(buffer_size);
+    if (!io_buffer) {
+        debug_log(DEBUG_LEVEL_ERROR, "Failed to allocate I/O buffer\n");
+        return APP_ERR_INVALID_PARAM;
+    }
+
     if (trcart.mapper == TRPAK_MAPPER_MBC1 && trcart.rombanks > 32u) {
+        debug_log(DEBUG_LEVEL_ERROR, "MBC1 with >32 banks not supported\n");
+        free(io_buffer);
         return TRPAK_ERR_UNSUPPORTED_CARTRIDGE;
     }
     if (trcart.mapper == TRPAK_MAPPER_HUC1 && trcart.rombanks > 64u) {
+        debug_log(DEBUG_LEVEL_ERROR, "HuC1 with >64 banks not supported\n");
+        free(io_buffer);
         return TRPAK_ERR_UNSUPPORTED_CARTRIDGE;
     }
 
-    draw_progress("Salvando ROM...", path, 0u, trcart.romsize);
+    draw_progress("Dumping ROM...", path, 0u, trcart.romsize, 0u);
 
     for (bank = 0u; bank < trcart.rombanks; bank++) {
         uint32_t address;
 
         result = cartridge_ready();
         if (result != TRPAK_OK) {
+            debug_log(DEBUG_LEVEL_ERROR, "Cartridge not ready at bank %u\n", bank);
             break;
         }
         result = trpak_select_rom_bank(bank);
         if (result != TRPAK_OK) {
+            debug_log(DEBUG_LEVEL_ERROR, "Failed to select bank %u: %d\n",
+                     bank, result);
             break;
         }
 
@@ -321,19 +711,24 @@ static int dump_rom_stream(FILE *file, const char *path, size_t *bytes_written)
              address += TRPAK_TRANSFER_BLOCK_SIZE) {
             result = cartridge_ready();
             if (result != TRPAK_OK) {
+                debug_log(DEBUG_LEVEL_ERROR, "Cartridge lost at bank %u, addr 0x%04X\n",
+                         bank, address);
                 break;
             }
             result = trpak_read_rom_block((uint16_t)address,
                                           &io_buffer[buffered]);
             if (result != TRPAK_OK) {
+                debug_log(DEBUG_LEVEL_ERROR, "Read failed at bank %u, addr 0x%04X: %d\n",
+                         bank, address, result);
                 break;
             }
             buffered += TRPAK_TRANSFER_BLOCK_SIZE;
             total += TRPAK_TRANSFER_BLOCK_SIZE;
 
-            if (buffered == sizeof(io_buffer)) {
-                result = flush_buffer(file, io_buffer, buffered);
+            if (buffered == buffer_size) {
+                result = safe_flush_buffer(file, io_buffer, buffered);
                 if (result != TRPAK_OK) {
+                    debug_log(DEBUG_LEVEL_ERROR, "Flush failed: %d\n", result);
                     break;
                 }
                 buffered = 0u;
@@ -342,12 +737,18 @@ static int dump_rom_stream(FILE *file, const char *path, size_t *bytes_written)
         if (result != TRPAK_OK) {
             break;
         }
-        draw_progress("Salvando ROM...", path, total, trcart.romsize);
+        draw_progress("Dumping ROM...", path, total, trcart.romsize,
+                     timer_ticks() - start_time);
     }
 
     if (result == TRPAK_OK) {
-        result = flush_buffer(file, io_buffer, buffered);
+        result = safe_flush_buffer(file, io_buffer, buffered);
+        if (result == TRPAK_OK) {
+            checksum = calculate_crc32(io_buffer, total);
+            debug_log(DEBUG_LEVEL_INFO, "ROM CRC32: 0x%08X\n", checksum);
+        }
     }
+
     *bytes_written = total;
 
     {
@@ -356,6 +757,8 @@ static int dump_rom_stream(FILE *file, const char *path, size_t *bytes_written)
             result = reset_result;
         }
     }
+
+    free(io_buffer);
     return result;
 }
 
@@ -380,18 +783,28 @@ static void normalize_mbc2(uint8_t block[TRPAK_TRANSFER_BLOCK_SIZE])
 
 static int dump_ram_stream(FILE *file, const char *path, size_t *bytes_written)
 {
-    uint8_t io_buffer[IO_BUFFER_SIZE];
+    uint8_t *io_buffer = NULL;
+    size_t buffer_size = IO_BUFFER_SIZE;
     size_t buffered = 0u;
     size_t total = 0u;
     uint16_t bank;
     int result = TRPAK_OK;
+    uint32_t start_time = timer_ticks();
+    uint32_t checksum = 0;
 
     *bytes_written = 0u;
     if (!trcart.ram || trcart.ramsize == 0u) {
+        debug_log(DEBUG_LEVEL_ERROR, "No RAM present\n");
         return TRPAK_ERR_NO_RAM;
     }
 
-    draw_progress("Salvando RAM...", path, 0u, trcart.ramsize);
+    io_buffer = malloc(buffer_size);
+    if (!io_buffer) {
+        debug_log(DEBUG_LEVEL_ERROR, "Failed to allocate I/O buffer\n");
+        return APP_ERR_INVALID_PARAM;
+    }
+
+    draw_progress("Backing up Save...", path, 0u, trcart.ramsize, 0u);
 
     for (bank = 0u; bank < trcart.rambanks; bank++) {
         size_t bank_size = ram_bytes_for_bank(bank);
@@ -399,10 +812,13 @@ static int dump_ram_stream(FILE *file, const char *path, size_t *bytes_written)
 
         result = cartridge_ready();
         if (result != TRPAK_OK) {
+            debug_log(DEBUG_LEVEL_ERROR, "Cartridge not ready at RAM bank %u\n", bank);
             break;
         }
         result = trpak_select_ram_bank(bank);
         if (result != TRPAK_OK) {
+            debug_log(DEBUG_LEVEL_ERROR, "Failed to select RAM bank %u: %d\n",
+                     bank, result);
             break;
         }
 
@@ -413,10 +829,14 @@ static int dump_ram_stream(FILE *file, const char *path, size_t *bytes_written)
 
             result = cartridge_ready();
             if (result != TRPAK_OK) {
+                debug_log(DEBUG_LEVEL_ERROR, "Cartridge lost at RAM bank %u, offset 0x%04X\n",
+                         bank, bank_offset);
                 break;
             }
             result = trpak_read_ram_block(address, block);
             if (result != TRPAK_OK) {
+                debug_log(DEBUG_LEVEL_ERROR, "Read failed at RAM bank %u: %d\n",
+                         bank, result);
                 break;
             }
             if (trcart.mapper == TRPAK_MAPPER_MBC2) {
@@ -425,9 +845,10 @@ static int dump_ram_stream(FILE *file, const char *path, size_t *bytes_written)
             buffered += TRPAK_TRANSFER_BLOCK_SIZE;
             total += TRPAK_TRANSFER_BLOCK_SIZE;
 
-            if (buffered == sizeof(io_buffer)) {
-                result = flush_buffer(file, io_buffer, buffered);
+            if (buffered == buffer_size) {
+                result = safe_flush_buffer(file, io_buffer, buffered);
                 if (result != TRPAK_OK) {
+                    debug_log(DEBUG_LEVEL_ERROR, "Flush failed: %d\n", result);
                     break;
                 }
                 buffered = 0u;
@@ -436,11 +857,16 @@ static int dump_ram_stream(FILE *file, const char *path, size_t *bytes_written)
         if (result != TRPAK_OK) {
             break;
         }
-        draw_progress("Salvando RAM...", path, total, trcart.ramsize);
+        draw_progress("Backing up Save...", path, total, trcart.ramsize,
+                     timer_ticks() - start_time);
     }
 
     if (result == TRPAK_OK) {
-        result = flush_buffer(file, io_buffer, buffered);
+        result = safe_flush_buffer(file, io_buffer, buffered);
+        if (result == TRPAK_OK) {
+            checksum = calculate_crc32(io_buffer, total);
+            debug_log(DEBUG_LEVEL_INFO, "RAM CRC32: 0x%08X\n", checksum);
+        }
     }
     *bytes_written = total;
 
@@ -450,50 +876,104 @@ static int dump_ram_stream(FILE *file, const char *path, size_t *bytes_written)
             result = cleanup_result;
         }
     }
+
+    free(io_buffer);
     return result;
 }
 
-static void show_info(void)
+/* ============================================================================
+ * RESTORE FUNCTIONS
+ * ============================================================================ */
+
+static int restore_ram_stream(FILE *file, const char *path, size_t *bytes_read)
 {
-    int result = refresh_cartridge();
+    uint8_t *io_buffer = NULL;
+    size_t buffer_size = IO_BUFFER_SIZE;
+    size_t buffered = 0u;
+    size_t total = 0u;
+    uint16_t bank;
+    int result = TRPAK_OK;
+    uint32_t start_time = timer_ticks();
 
-    console_clear();
-    printf("%s\n\n", APP_NAME);
-    printf("Info\n\n");
-    if (result != TRPAK_OK) {
-        printf("Transfer Pak/fita: ERRO\n");
-        printf("%s (%d)\n\n", app_error_string(result), result);
-        printf("Confira o controle na porta 1, o\n");
-        printf("Transfer Pak e a fita de Game Boy.\n");
-    } else {
-        const char *system = trcart.gbc == 0xC0u
-            ? "Game Boy Color only"
-            : (trcart.gbc == 0x80u ? "Game Boy / Color" : "Game Boy");
-
-        printf("Title: %s\n", trcart.title);
-        printf("System: %s\n", system);
-        printf("Mapper: %s\n", mapper_name(trcart.mapper));
-        printf("Cart type: 0x%02X\n", trcart.cartridge_type);
-        printf("ROM: %lu KiB (%u banks)\n",
-               (unsigned long)(trcart.romsize / 1024u), trcart.rombanks);
-        if (trcart.ram) {
-            printf("RAM: %lu bytes (%u banks)\n",
-                   (unsigned long)trcart.ramsize, trcart.rambanks);
-        } else {
-            printf("RAM: none\n");
-        }
-        printf("Battery: %s  RTC: %s\n",
-               trcart.battery ? "yes" : "no",
-               trcart.rtc ? "yes" : "no");
-        printf("Rumble: %s  SGB: %s\n",
-               trcart.rumble ? "yes" : "no",
-               trcart.sgb == 0x03u ? "yes" : "no");
+    *bytes_read = 0u;
+    if (!trcart.ram || trcart.ramsize == 0u) {
+        debug_log(DEBUG_LEVEL_ERROR, "No RAM present\n");
+        return TRPAK_ERR_NO_RAM;
     }
-    printf("\nmicroSD: %s\n", sd_ready ? "ready" : "not mounted");
-    printf("\nA/B: voltar\n");
-    console_render();
-    wait_for_ack();
+
+    io_buffer = malloc(buffer_size);
+    if (!io_buffer) {
+        debug_log(DEBUG_LEVEL_ERROR, "Failed to allocate I/O buffer\n");
+        return APP_ERR_INVALID_PARAM;
+    }
+
+    draw_progress("Restoring Save...", path, 0u, trcart.ramsize, 0u);
+
+    for (bank = 0u; bank < trcart.rambanks; bank++) {
+        size_t bank_size = ram_bytes_for_bank(bank);
+        size_t bank_offset;
+
+        result = cartridge_ready();
+        if (result != TRPAK_OK) {
+            debug_log(DEBUG_LEVEL_ERROR, "Cartridge not ready at RAM bank %u\n", bank);
+            break;
+        }
+        result = trpak_select_ram_bank(bank);
+        if (result != TRPAK_OK) {
+            debug_log(DEBUG_LEVEL_ERROR, "Failed to select RAM bank %u: %d\n",
+                     bank, result);
+            break;
+        }
+
+        for (bank_offset = 0u; bank_offset < bank_size;
+             bank_offset += TRPAK_TRANSFER_BLOCK_SIZE) {
+
+            /* Read from the file when the buffer is empty. */
+            if (buffered == 0u) {
+                size_t to_read = buffer_size;
+                if (to_read > bank_size - bank_offset) {
+                    to_read = bank_size - bank_offset;
+                }
+                size_t read = fread(io_buffer, 1u, to_read, file);
+                if (read != to_read) {
+                    debug_log(DEBUG_LEVEL_ERROR, "File read failed: read %zu of %zu bytes\n",
+                             read, to_read);
+                    result = APP_ERR_FILE_READ;
+                    break;
+                }
+                buffered = to_read;
+                total += to_read;
+            }
+
+            uint16_t address = (uint16_t)(0xE000u + bank_offset);
+            result = trpak_write_ram_block(address, &io_buffer[bank_offset]);
+            if (result != TRPAK_OK) {
+                debug_log(DEBUG_LEVEL_ERROR, "Write failed at RAM bank %u: %d\n",
+                         bank, result);
+                break;
+            }
+
+            draw_progress("Restoring Save...", path, total, trcart.ramsize,
+                         timer_ticks() - start_time);
+        }
+        if (result != TRPAK_OK) {
+            break;
+        }
+    }
+
+    if (result == TRPAK_OK) {
+        result = trpak_disable_ram();
+        debug_log(DEBUG_LEVEL_INFO, "RAM restore completed: %zu bytes\n", total);
+    }
+
+    *bytes_read = total;
+    free(io_buffer);
+    return result;
 }
+
+/* ============================================================================
+ * OPERATION FUNCTIONS
+ * ============================================================================ */
 
 static void perform_dump(bool save_ram)
 {
@@ -506,31 +986,40 @@ static void perform_dump(bool save_ram)
     int result;
 
     console_clear();
-    printf("%s\n\n", APP_NAME);
-    printf("Inicializando Transfer Pak...\n");
+    draw_header();
+    printf("\nPreparing Transfer Pak...\n");
+    draw_footer("Please wait...");
     console_render();
 
     result = refresh_cartridge();
     if (result != TRPAK_OK) {
         snprintf(detail, sizeof(detail), "%s (%d)",
                  app_error_string(result), result);
-        show_message("Falha", detail,
-                     "Confira o controle, Transfer Pak e fita.");
+        show_message("Failed", detail,
+                     "Check controller, Transfer Pak and cartridge.");
         return;
     }
 
     if (save_ram && (!trcart.ram || trcart.ramsize == 0u)) {
-        show_message("Save RAM", "Esta fita nao possui RAM.", NULL);
+        show_message("BACKUP SAVE", "This cartridge has no save RAM.", NULL);
         shutdown_cartridge();
         return;
     }
 
-    result = ensure_dump_directory();
+    if (!confirm_action(save_ram ? "BACKUP SAVE" : "DUMP ROM",
+                        cartridge_title(),
+                        "A new file will be created on the microSD.")) {
+        shutdown_cartridge();
+        return;
+    }
+
+    result = ensure_dump_directory(save_ram);
     if (result == TRPAK_OK) {
         const char *extension = save_ram
             ? "sav"
             : (trcart.gbc != 0u ? "gbc" : "gb");
-        result = open_unique_file(extension, path, &file);
+        result = open_unique_file(save_ram ? save_dump_directory : rom_dump_directory,
+                                  extension, path, &file);
     }
     if (result == TRPAK_OK) {
         result = save_ram
@@ -541,34 +1030,195 @@ static void perform_dump(bool save_ram)
     if (file != NULL) {
         partial_created = true;
         if (fclose(file) != 0 && result == TRPAK_OK) {
+            debug_log(DEBUG_LEVEL_ERROR, "Failed to close file: %s\n", path);
             result = APP_ERR_FILE_CLOSE;
         }
         if (result != TRPAK_OK) {
             partial_removed = remove(path) == 0;
+            if (partial_removed) {
+                debug_log(DEBUG_LEVEL_INFO, "Partial file removed: %s\n", path);
+            } else {
+                debug_log(DEBUG_LEVEL_ERROR, "Failed to remove partial file: %s\n", path);
+            }
         }
     }
     shutdown_cartridge();
 
     if (result == TRPAK_OK) {
-        snprintf(detail, sizeof(detail), "%lu bytes gravados.",
+        snprintf(detail, sizeof(detail), "%lu bytes written.",
                  (unsigned long)bytes_written);
-        show_message(save_ram ? "RAM salva" : "ROM salva", path, detail);
+        show_message(save_ram ? "SAVE BACKUP COMPLETE" : "ROM DUMP COMPLETE",
+                     path, detail);
     } else {
         snprintf(detail, sizeof(detail), "%s (%d)",
                  app_error_string(result), result);
         show_message(!partial_created
-                         ? "Falha"
+                         ? "Failed"
                          : (partial_removed
-                                ? "Falha; arquivo incompleto removido"
-                                : "Falha; remova o arquivo incompleto"),
+                                ? "Failed; incomplete file removed"
+                                : "Failed; remove incomplete file"),
                      detail,
                      partial_created && !partial_removed ? path : NULL);
     }
 }
 
+static void perform_restore(void)
+{
+    FILE *file = NULL;
+    char path[128];
+    char detail[96];
+    size_t bytes_read = 0u;
+    int result;
+
+    console_clear();
+    draw_header();
+    printf("\nPreparing to restore save...\n");
+    draw_footer("Please wait...");
+    console_render();
+
+    result = refresh_cartridge();
+    if (result != TRPAK_OK) {
+        snprintf(detail, sizeof(detail), "%s (%d)",
+                 app_error_string(result), result);
+        show_message("Failed", detail,
+                     "Check controller, Transfer Pak and cartridge.");
+        return;
+    }
+
+    if (!trcart.ram || trcart.ramsize == 0u) {
+        show_message("RESTORE SAVE",
+                     "This cartridge has no save RAM.", NULL);
+        shutdown_cartridge();
+        return;
+    }
+
+    result = ensure_dump_directory(true);
+    if (result != TRPAK_OK) {
+        show_message("Failed", app_error_string(result),
+                     "Check microSD card.");
+        shutdown_cartridge();
+        return;
+    }
+
+    if (!select_restore_file(save_dump_directory, path, sizeof(path))) {
+        show_message("RESTORE SAVE",
+                     "No .sav file found.",
+                     "Dump a save first.");
+        shutdown_cartridge();
+        return;
+    }
+
+    result = validate_restore_file(path);
+    if (result != TRPAK_OK) {
+        snprintf(detail, sizeof(detail), "%s (%d)",
+                 app_error_string(result), result);
+        show_message("Failed", detail,
+                     "Invalid or incompatible file.");
+        shutdown_cartridge();
+        return;
+    }
+
+    if (!confirm_action("RESTORE SAVE",
+                        "WARNING: This will overwrite the current save!",
+                        path)) {
+        shutdown_cartridge();
+        return;
+    }
+
+    file = fopen(path, "rb");
+    if (!file) {
+        show_message("Failed", "Unable to open file.",
+                     "Check microSD card.");
+        shutdown_cartridge();
+        return;
+    }
+
+    result = restore_ram_stream(file, path, &bytes_read);
+    fclose(file);
+    shutdown_cartridge();
+
+    if (result == TRPAK_OK) {
+        snprintf(detail, sizeof(detail), "%lu bytes restored.",
+                 (unsigned long)bytes_read);
+        show_message("SAVE RESTORED SUCCESSFULLY", path, detail);
+    } else {
+        snprintf(detail, sizeof(detail), "%s (%d)",
+                 app_error_string(result), result);
+        show_message("Restore failed", detail, NULL);
+    }
+}
+
+/* ============================================================================
+ * INFO MENU FUNCTIONS
+ * ============================================================================ */
+
+static void draw_info(int result)
+{
+    console_clear();
+    draw_header();
+    printf("\nCARTRIDGE INFORMATION\n");
+    printf("------------------------------------------\n");
+    if (result != TRPAK_OK) {
+        printf("Cartridge : Not ready\n");
+        printf("Status    : %s\n", app_error_string(result));
+        printf("\nCheck controller port 1, Transfer Pak,\n");
+        printf("and the Game Boy cartridge.\n");
+        draw_footer("START: refresh       B: back");
+    } else {
+        printf("Title      %s\n", cartridge_title());
+        printf("System     %s\n", system_name());
+        printf("Type       0x%02X  %s\n", trcart.cartridge_type,
+               mapper_name(trcart.mapper));
+        printf("ROM Size   %lu KiB  / %u banks\n",
+               (unsigned long)(trcart.romsize / 1024u), trcart.rombanks);
+        printf("RAM Size   %lu KiB  / %u banks\n",
+               (unsigned long)(trcart.ramsize / 1024u), trcart.rambanks);
+        printf("Features   Save:%s Battery:%s\n",
+               yes_no(trcart.ram), yes_no(trcart.battery));
+        printf("           RTC:%s Rumble:%s\n",
+               yes_no(trcart.rtc), yes_no(trcart.rumble));
+        printf("\nStatus     READY     SD: %s\n",
+               sd_ready ? "READY" : "NOT MOUNTED");
+        printf("ROM path   %s\n", rom_dump_directory);
+        printf("Save path  %s\n", save_dump_directory);
+        draw_footer("A: Dump ROM START: refresh B: back");
+    }
+    console_render();
+}
+
+static bool show_info(void)
+{
+    int result = refresh_cartridge();
+
+    for (;;) {
+        joypad_buttons_t pressed;
+        draw_info(result);
+        for (;;) {
+            joypad_poll();
+            pressed = joypad_get_buttons_pressed(JOYPAD_PORT_1);
+            if (pressed.b) {
+                return false;
+            }
+            if (pressed.start) {
+                result = refresh_cartridge();
+                break;
+            }
+            if (pressed.a && result == TRPAK_OK) {
+                return true;
+            }
+            wait_ms(16);
+        }
+    }
+}
+
+/* ============================================================================
+ * MAIN MENU FUNCTIONS
+ * ============================================================================ */
+
 static bool menu_item_selectable(int item)
 {
-    return item != MENU_RESTORE_RAM;
+    /* All options are selectable now. */
+    return true;
 }
 
 static int move_selection(int current, int direction)
@@ -584,40 +1234,56 @@ static void draw_menu(int selected)
     int i;
 
     console_clear();
-    printf("%s\n", APP_NAME);
-    printf("SummerCart64 + Transfer Pak\n\n");
+    draw_header();
+    printf("\nCARTRIDGE\n");
+    printf("------------------------------------------\n");
 
     if (cart_known) {
-        printf("Cart: %s\n", trcart.title);
+        printf("%s\n", cartridge_title());
+        printf("%s  |  %lu KiB ROM\n", system_name(),
+               (unsigned long)(trcart.romsize / 1024u));
     } else {
-        printf("Cart: not detected\n");
+        printf("No cartridge detected\n");
+        printf("Use Info to check the Transfer Pak.\n");
     }
-    printf("microSD: %s\n\n", sd_ready ? "ready" : "not mounted");
+    printf("microSD: %s\n\n", sd_ready ? "READY" : "NOT MOUNTED");
+
+    printf("ACTIONS\n");
+    printf("------------------------------------------\n");
 
     for (i = 0; i < MENU_ITEM_COUNT; i++) {
         const char *cursor = i == selected ? ">" : " ";
-        const char *suffix = i == MENU_RESTORE_RAM ? " [disabled]" : "";
-        printf("%s %s%s\n", cursor, menu_labels[i], suffix);
+        printf("%s %-22s\n", cursor, menu_labels[i]);
     }
 
-    printf("\nD-Pad: mover   A: selecionar\n");
+    draw_footer("D-Pad: move A: select START: refresh");
     console_render();
 }
+
+/* ============================================================================
+ * MAIN FUNCTION
+ * ============================================================================ */
 
 int main(void)
 {
     int selected = MENU_INFO;
     bool running = true;
 
+    /* Initialization */
     console_init();
     console_set_render_mode(RENDER_MANUAL);
     joypad_init();
     debug_init(DEBUG_FEATURE_LOG_USB | DEBUG_FEATURE_LOG_EMU);
 
-    (void)ensure_sd();
+    debug_log(DEBUG_LEVEL_INFO, "%s v%s by %s\n", APP_NAME, APP_VERSION, APP_AUTHOR);
+
+    /* Initialize hardware. */
+    (void)ensure_dump_directory(false);
+    (void)ensure_dump_directory(true);
     (void)refresh_cartridge();
     draw_menu(selected);
 
+    /* Main loop. */
     while (running) {
         joypad_poll();
         joypad_buttons_t pressed =
@@ -629,10 +1295,17 @@ int main(void)
         } else if (pressed.d_down) {
             selected = move_selection(selected, 1);
             draw_menu(selected);
-        } else if (pressed.a || pressed.start) {
+        } else if (pressed.start) {
+            (void)refresh_cartridge();
+            (void)ensure_dump_directory(false);
+            (void)ensure_dump_directory(true);
+            draw_menu(selected);
+        } else if (pressed.a) {
             switch ((menu_item)selected) {
             case MENU_INFO:
-                show_info();
+                if (show_info()) {
+                    perform_dump(false);
+                }
                 break;
             case MENU_SAVE_ROM:
                 perform_dump(false);
@@ -641,9 +1314,13 @@ int main(void)
                 perform_dump(true);
                 break;
             case MENU_RESTORE_RAM:
+                perform_restore();
                 break;
             case MENU_EXIT:
-                running = false;
+                if (confirm_action("EXIT", "Do you want to exit?",
+                                   "The Transfer Pak will be powered down.")) {
+                    running = false;
+                }
                 break;
             }
             if (running) {
@@ -653,16 +1330,20 @@ int main(void)
         wait_ms(16);
     }
 
+    /* Shutdown */
     shutdown_cartridge();
     if (sd_ready) {
         debug_close_sdfs();
     }
 
     console_clear();
-    printf("%s\n\n", APP_NAME);
-    printf("Transfer Pak desligado.\n");
-    printf("Pode reiniciar o Nintendo 64.\n");
+    draw_header();
+    printf("\nTRANSFER PAK POWERED DOWN\n\n");
+    printf("You can restart the Nintendo 64.\n");
+    draw_footer("Thank you for preserving your games.");
     console_render();
+
+    debug_log(DEBUG_LEVEL_INFO, "Application exiting\n");
 
     joypad_close();
     return 0;
