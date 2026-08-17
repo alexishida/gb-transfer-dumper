@@ -5,6 +5,8 @@ Created by Alex Ishida.
 An N64 homebrew utility that copies ROM and RAM from a Game Boy or Game Boy
 Color cartridge to a SummerCart64 microSD card through a Transfer Pak.
 
+<img src="docs/screenshot.jpg" alt="GB Transfer Dumper running on Nintendo 64" width="300">
+
 The menu provides:
 
 - `Info`: re-reads the cartridge and displays its title, system, mapper, type,
