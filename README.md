@@ -45,14 +45,14 @@ file exists, the first one returned by the filesystem is used.
 
 ## Safety and reliability
 
-- Cartridge readiness is checked throughout each transfer, with a five-second
-  readiness timeout;
+- Cartridge presence and power are checked throughout each transfer; initial
+  readiness and reset handling are delegated to libtrpak;
 - the application uses a 4 KiB streaming buffer, so it does not need to hold a
   complete ROM in N64 memory;
 - failed ROM or save backups remove their incomplete output file whenever
   possible;
 - save restore rejects cartridges without RAM and files whose size differs from
-  the cartridge RAM capacity;
+  the cartridge RAM capacity, and verifies every block after writing it;
 - debug logging for transfer, filesystem, and hardware errors is available
   when the program is built with `ENABLE_DEBUG`.
 
@@ -72,6 +72,10 @@ Do not remove the cartridge or Transfer Pak while an operation is in progress.
   toolchain;
 - [libtrpak](https://github.com/alexishida/libtrpak), downloaded by the
   Makefile and pinned to commit `22aa35fb928247686b0f9dbcdf3f901768c96d70`.
+
+The Makefile downloads libtrpak into `.deps/libtrpak` on the first build.
+The entire `.deps/` directory is generated locally and is intentionally ignored
+by Git.
 
 The program uses libtrpak's public banking/block API and streams data to the
 microSD card. It therefore does not need to keep an entire ROM in RDRAM and
@@ -135,7 +139,7 @@ make clean
 ## libtrpak limitations
 
 - MMM01, MBC4, TAMA5, and HuC3 are detected but do not have banking support;
-- MBC1 cartridges above 32 banks and HuC1 cartridges above 64 banks are
+- MBC1 cartridges above 128 banks and HuC1 cartridges above 64 banks are
   rejected to prevent incomplete dumps;
 - Game Boy Camera and HuC1 remain experimental paths;
 - RTC and rumble are detected only; they are not separately backed up or

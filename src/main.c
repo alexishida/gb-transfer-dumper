@@ -5,7 +5,7 @@
  * Nintendo 64 Transfer Pak.
  *
  * Author: Alex Ishida
- * Version: 2.0
+ * Version: 1.0
  * License: MIT
  */
 
@@ -47,10 +47,8 @@
 #define APP_ERR_FILE_NOT_FOUND     (-108)
 #define APP_ERR_FILE_SIZE_MISMATCH (-109)
 #define APP_ERR_CANCELLED          (-110)
-#define APP_ERR_TIMEOUT            (-111)
 
-/* Timeouts and configuration */
-#define OPERATION_TIMEOUT_MS       5000
+/* Status configuration */
 #define STATUS_CACHE_DURATION_MS   50
 
 /* Debug levels */
@@ -73,7 +71,7 @@ typedef enum menu_item {
 
 typedef struct {
     uint8_t last_status;
-    uint32_t last_poll_time;
+    uint64_t last_poll_time;
     bool is_cached;
     uint32_t cache_duration_ms;
 } status_cache_t;
@@ -110,6 +108,7 @@ static void debug_log(int level, const char *format, ...)
 {
     #ifdef ENABLE_DEBUG
     if (level <= debug_level) {
+        char message[256];
         va_list args;
         va_start(args, format);
 
@@ -121,10 +120,13 @@ static void debug_log(int level, const char *format, ...)
             default: level_str = "UNKNOWN"; break;
         }
 
-        debugf("[%s] ", level_str);
-        vdebugf(format, args);
+        vsnprintf(message, sizeof(message), format, args);
         va_end(args);
+        debugf("[%s] %s", level_str, message);
     }
+    #else
+    (void)level;
+    (void)format;
     #endif
 }
 
@@ -176,7 +178,7 @@ static const char *app_error_string(int result)
 {
     switch (result) {
         case APP_ERR_SD_MOUNT: return "Unable to mount microSD";
-        case APP_ERR_SD_DIRECTORY: return "Unable to create /gbdump directory";
+        case APP_ERR_SD_DIRECTORY: return "Unable to access dump directory";
         case APP_ERR_FILE_OPEN: return "Unable to create file";
         case APP_ERR_FILE_WRITE: return "Error writing to microSD";
         case APP_ERR_FILE_CLOSE: return "Error closing file";
@@ -186,7 +188,6 @@ static const char *app_error_string(int result)
         case APP_ERR_FILE_NOT_FOUND: return "File not found";
         case APP_ERR_FILE_SIZE_MISMATCH: return "File size mismatch";
         case APP_ERR_CANCELLED: return "Operation cancelled";
-        case APP_ERR_TIMEOUT: return "Operation timeout";
         default: return trpak_error_string(result);
     }
 }
@@ -283,10 +284,11 @@ static void shutdown_cartridge(void)
 
 static int get_cached_status(uint8_t *status, bool force_refresh)
 {
-    uint32_t now = timer_ticks();
+    uint64_t now = (uint64_t)timer_ticks();
 
     if (!force_refresh && status_cache.is_cached &&
-        (now - status_cache.last_poll_time) < status_cache.cache_duration_ms) {
+        (now - status_cache.last_poll_time) <
+            (uint64_t)TICKS_FROM_MS(status_cache.cache_duration_ms)) {
         *status = status_cache.last_status;
         return TRPAK_OK;
     }
@@ -302,42 +304,28 @@ static int get_cached_status(uint8_t *status, bool force_refresh)
     return result;
 }
 
-static int cartridge_ready_with_timeout(uint32_t timeout_ms)
-{
-    uint32_t start_time = timer_ticks();
-    uint8_t status;
-    int result;
-
-    while ((timer_ticks() - start_time) < timeout_ms) {
-        result = get_cached_status(&status, false);
-        if (result != TRPAK_OK) {
-            debug_log(DEBUG_LEVEL_VERBOSE, "Status query failed: %d\n", result);
-            return result;
-        }
-
-        if ((status & TRPAK_STATUS_REMOVED) != 0u) {
-            debug_log(DEBUG_LEVEL_ERROR, "Cartridge removed\n");
-            return TRPAK_ERR_NO_CARTRIDGE;
-        }
-        if ((status & TRPAK_STATUS_POWERED) == 0u) {
-            debug_log(DEBUG_LEVEL_VERBOSE, "Cartridge not powered\n");
-            return TRPAK_ERR_POWER_OFF;
-        }
-        if ((status & TRPAK_STATUS_READY) != 0u &&
-            (status & TRPAK_STATUS_IS_RESETTING) == 0u) {
-            debug_log(DEBUG_LEVEL_VERBOSE, "Cartridge ready\n");
-            return TRPAK_OK;
-        }
-        wait_ms(10);
-    }
-
-    debug_log(DEBUG_LEVEL_ERROR, "Cartridge ready timeout\n");
-    return APP_ERR_TIMEOUT;
-}
-
 static int cartridge_ready(void)
 {
-    return cartridge_ready_with_timeout(OPERATION_TIMEOUT_MS);
+    uint8_t status;
+    int result = get_cached_status(&status, false);
+
+    if (result != TRPAK_OK) {
+        debug_log(DEBUG_LEVEL_VERBOSE, "Status query failed: %d\n", result);
+        return result;
+    }
+    if ((status & TRPAK_STATUS_REMOVED) != 0u) {
+        debug_log(DEBUG_LEVEL_ERROR, "Cartridge removed\n");
+        return TRPAK_ERR_NO_CARTRIDGE;
+    }
+    if ((status & TRPAK_STATUS_POWERED) == 0u) {
+        debug_log(DEBUG_LEVEL_VERBOSE, "Cartridge not powered\n");
+        return TRPAK_ERR_POWER_OFF;
+    }
+
+    /* trpak_init() already waits for reset completion. Some hardware keeps
+     * READY/RESETTING status bits asserted inconsistently during active
+     * access, so block I/O is the authority after successful initialization. */
+    return TRPAK_OK;
 }
 
 static int refresh_cartridge(void)
@@ -525,9 +513,11 @@ static bool select_restore_file(const char *directory, char *path,
     int result = dir_findfirst(directory, &entry);
 
     while (result == 0) {
-        if (entry.d_type == DT_REG && strstr(entry.d_name, ".sav")) {
+        size_t name_length = strlen(entry.d_name);
+        bool is_save = name_length >= 4u &&
+            strcmp(&entry.d_name[name_length - 4u], ".sav") == 0;
+        if (entry.d_type == DT_REG && is_save) {
             size_t directory_length = strlen(directory);
-            size_t name_length = strlen(entry.d_name);
             bool needs_separator = directory[directory_length - 1u] != '/';
             if (name_length + directory_length + (needs_separator ? 2u : 1u) > path_size) {
                 result = dir_findnext(directory, &entry);
@@ -589,9 +579,8 @@ static int safe_flush_buffer(FILE *file, const uint8_t *buffer, size_t size)
  * PROGRESS AND VALIDATION FUNCTIONS
  * ============================================================================ */
 
-static uint32_t calculate_crc32(const uint8_t *data, size_t size)
+static uint32_t update_crc32(uint32_t crc, const uint8_t *data, size_t size)
 {
-    uint32_t crc = 0xFFFFFFFF;
     for (size_t i = 0; i < size; i++) {
         crc ^= data[i];
         for (int j = 0; j < 8; j++) {
@@ -602,11 +591,11 @@ static uint32_t calculate_crc32(const uint8_t *data, size_t size)
             }
         }
     }
-    return ~crc;
+    return crc;
 }
 
 static void draw_progress(const char *operation, const char *path,
-                          size_t done, size_t total, uint32_t elapsed_ms)
+                          size_t done, size_t total, uint64_t elapsed_ticks)
 {
     char bar[21];
     unsigned int filled;
@@ -627,7 +616,8 @@ static void draw_progress(const char *operation, const char *path,
     /* Calculate transfer speed and remaining time. */
     float rate_kb_s = 0.0f;
     uint32_t remaining_ms = 0;
-    if (done > 0 && elapsed_ms > 0) {
+    uint64_t elapsed_ms = (uint64_t)TICKS_TO_MS(elapsed_ticks);
+    if (done > 0 && elapsed_ms > 0u) {
         float rate = (float)done / elapsed_ms;  /* bytes/ms */
         rate_kb_s = rate * 1000.0f / 1024.0f;   /* KiB/s */
         remaining_ms = (uint32_t)((total - done) / rate);
@@ -667,8 +657,8 @@ static int dump_rom_stream(FILE *file, const char *path, size_t *bytes_written)
     size_t total = 0u;
     uint16_t bank;
     int result = TRPAK_OK;
-    uint32_t start_time = timer_ticks();
-    uint32_t checksum = 0;
+    uint64_t start_time = (uint64_t)timer_ticks();
+    uint32_t checksum = 0xFFFFFFFFu;
 
     *bytes_written = 0u;
 
@@ -679,8 +669,8 @@ static int dump_rom_stream(FILE *file, const char *path, size_t *bytes_written)
         return APP_ERR_INVALID_PARAM;
     }
 
-    if (trcart.mapper == TRPAK_MAPPER_MBC1 && trcart.rombanks > 32u) {
-        debug_log(DEBUG_LEVEL_ERROR, "MBC1 with >32 banks not supported\n");
+    if (trcart.mapper == TRPAK_MAPPER_MBC1 && trcart.rombanks > 128u) {
+        debug_log(DEBUG_LEVEL_ERROR, "MBC1 with >128 banks not supported\n");
         free(io_buffer);
         return TRPAK_ERR_UNSUPPORTED_CARTRIDGE;
     }
@@ -726,6 +716,7 @@ static int dump_rom_stream(FILE *file, const char *path, size_t *bytes_written)
             total += TRPAK_TRANSFER_BLOCK_SIZE;
 
             if (buffered == buffer_size) {
+                checksum = update_crc32(checksum, io_buffer, buffered);
                 result = safe_flush_buffer(file, io_buffer, buffered);
                 if (result != TRPAK_OK) {
                     debug_log(DEBUG_LEVEL_ERROR, "Flush failed: %d\n", result);
@@ -738,14 +729,14 @@ static int dump_rom_stream(FILE *file, const char *path, size_t *bytes_written)
             break;
         }
         draw_progress("Dumping ROM...", path, total, trcart.romsize,
-                     timer_ticks() - start_time);
+                     (uint64_t)timer_ticks() - start_time);
     }
 
     if (result == TRPAK_OK) {
+        checksum = update_crc32(checksum, io_buffer, buffered);
         result = safe_flush_buffer(file, io_buffer, buffered);
         if (result == TRPAK_OK) {
-            checksum = calculate_crc32(io_buffer, total);
-            debug_log(DEBUG_LEVEL_INFO, "ROM CRC32: 0x%08X\n", checksum);
+            debug_log(DEBUG_LEVEL_INFO, "ROM CRC32: 0x%08X\n", ~checksum);
         }
     }
 
@@ -789,8 +780,8 @@ static int dump_ram_stream(FILE *file, const char *path, size_t *bytes_written)
     size_t total = 0u;
     uint16_t bank;
     int result = TRPAK_OK;
-    uint32_t start_time = timer_ticks();
-    uint32_t checksum = 0;
+    uint64_t start_time = (uint64_t)timer_ticks();
+    uint32_t checksum = 0xFFFFFFFFu;
 
     *bytes_written = 0u;
     if (!trcart.ram || trcart.ramsize == 0u) {
@@ -846,6 +837,7 @@ static int dump_ram_stream(FILE *file, const char *path, size_t *bytes_written)
             total += TRPAK_TRANSFER_BLOCK_SIZE;
 
             if (buffered == buffer_size) {
+                checksum = update_crc32(checksum, io_buffer, buffered);
                 result = safe_flush_buffer(file, io_buffer, buffered);
                 if (result != TRPAK_OK) {
                     debug_log(DEBUG_LEVEL_ERROR, "Flush failed: %d\n", result);
@@ -858,14 +850,14 @@ static int dump_ram_stream(FILE *file, const char *path, size_t *bytes_written)
             break;
         }
         draw_progress("Backing up Save...", path, total, trcart.ramsize,
-                     timer_ticks() - start_time);
+                     (uint64_t)timer_ticks() - start_time);
     }
 
     if (result == TRPAK_OK) {
+        checksum = update_crc32(checksum, io_buffer, buffered);
         result = safe_flush_buffer(file, io_buffer, buffered);
         if (result == TRPAK_OK) {
-            checksum = calculate_crc32(io_buffer, total);
-            debug_log(DEBUG_LEVEL_INFO, "RAM CRC32: 0x%08X\n", checksum);
+            debug_log(DEBUG_LEVEL_INFO, "RAM CRC32: 0x%08X\n", ~checksum);
         }
     }
     *bytes_written = total;
@@ -888,12 +880,14 @@ static int dump_ram_stream(FILE *file, const char *path, size_t *bytes_written)
 static int restore_ram_stream(FILE *file, const char *path, size_t *bytes_read)
 {
     uint8_t *io_buffer = NULL;
+    uint8_t verification[TRPAK_TRANSFER_BLOCK_SIZE];
     size_t buffer_size = IO_BUFFER_SIZE;
     size_t buffered = 0u;
+    size_t buffer_offset = 0u;
     size_t total = 0u;
     uint16_t bank;
     int result = TRPAK_OK;
-    uint32_t start_time = timer_ticks();
+    uint64_t start_time = (uint64_t)timer_ticks();
 
     *bytes_read = 0u;
     if (!trcart.ram || trcart.ramsize == 0u) {
@@ -928,8 +922,8 @@ static int restore_ram_stream(FILE *file, const char *path, size_t *bytes_read)
         for (bank_offset = 0u; bank_offset < bank_size;
              bank_offset += TRPAK_TRANSFER_BLOCK_SIZE) {
 
-            /* Read from the file when the buffer is empty. */
-            if (buffered == 0u) {
+            /* Refill only after every byte in the previous chunk was used. */
+            if (buffer_offset == buffered) {
                 size_t to_read = buffer_size;
                 if (to_read > bank_size - bank_offset) {
                     to_read = bank_size - bank_offset;
@@ -942,27 +936,63 @@ static int restore_ram_stream(FILE *file, const char *path, size_t *bytes_read)
                     break;
                 }
                 buffered = to_read;
-                total += to_read;
+                buffer_offset = 0u;
             }
 
             uint16_t address = (uint16_t)(0xE000u + bank_offset);
-            result = trpak_write_ram_block(address, &io_buffer[bank_offset]);
+            result = cartridge_ready();
+            if (result != TRPAK_OK) {
+                debug_log(DEBUG_LEVEL_ERROR,
+                         "Cartridge lost at RAM bank %u, offset 0x%04X\n",
+                         bank, bank_offset);
+                break;
+            }
+            result = trpak_write_ram_block(address, &io_buffer[buffer_offset]);
             if (result != TRPAK_OK) {
                 debug_log(DEBUG_LEVEL_ERROR, "Write failed at RAM bank %u: %d\n",
                          bank, result);
                 break;
             }
 
-            draw_progress("Restoring Save...", path, total, trcart.ramsize,
-                         timer_ticks() - start_time);
+            result = trpak_read_ram_block(address, verification);
+            if (result != TRPAK_OK) {
+                debug_log(DEBUG_LEVEL_ERROR,
+                         "Verification read failed at RAM bank %u: %d\n",
+                         bank, result);
+                break;
+            }
+            if (trcart.mapper == TRPAK_MAPPER_MBC2) {
+                normalize_mbc2(verification);
+            }
+            if (memcmp(&io_buffer[buffer_offset], verification,
+                       TRPAK_TRANSFER_BLOCK_SIZE) != 0) {
+                debug_log(DEBUG_LEVEL_ERROR,
+                         "Verification failed at RAM bank %u, offset 0x%04X\n",
+                         bank, bank_offset);
+                result = TRPAK_ERR_VERIFY_FAILED;
+                break;
+            }
+
+            buffer_offset += TRPAK_TRANSFER_BLOCK_SIZE;
+            total += TRPAK_TRANSFER_BLOCK_SIZE;
+
+            if (total % buffer_size == 0u || total == trcart.ramsize) {
+                draw_progress("Restoring Save...", path, total, trcart.ramsize,
+                              (uint64_t)timer_ticks() - start_time);
+            }
         }
         if (result != TRPAK_OK) {
             break;
         }
     }
 
+    {
+        int cleanup_result = trpak_disable_ram();
+        if (result == TRPAK_OK && cleanup_result != TRPAK_OK) {
+            result = cleanup_result;
+        }
+    }
     if (result == TRPAK_OK) {
-        result = trpak_disable_ram();
         debug_log(DEBUG_LEVEL_INFO, "RAM restore completed: %zu bytes\n", total);
     }
 
@@ -1273,6 +1303,7 @@ int main(void)
     console_init();
     console_set_render_mode(RENDER_MANUAL);
     joypad_init();
+    timer_init();
     debug_init(DEBUG_FEATURE_LOG_USB | DEBUG_FEATURE_LOG_EMU);
 
     debug_log(DEBUG_LEVEL_INFO, "%s v%s by %s\n", APP_NAME, APP_VERSION, APP_AUTHOR);
@@ -1346,5 +1377,6 @@ int main(void)
     debug_log(DEBUG_LEVEL_INFO, "Application exiting\n");
 
     joypad_close();
+    timer_close();
     return 0;
 }
