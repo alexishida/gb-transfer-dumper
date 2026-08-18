@@ -12,6 +12,7 @@
 
 #include "app.h"
 #include "cart.h"
+#include "transfer_status.h"
 #include "ui.h"
 
 /* Buffer installed on the streamed file. libtrpak hands over one 32-byte block
@@ -46,6 +47,8 @@ typedef struct {
     int error;              /**< First file error, or ::TRPAK_OK. */
     bool active;            /**< True only while a bulk transfer is running. */
     bool status_compat_logged; /**< Prevents repeated status workaround logs. */
+    bool reset_compat_logged; /**< Prevents repeated reset-latch workaround logs. */
+    transfer_status_filter_t status_filter; /**< Active status edge state. */
     ui_progress_t progress; /**< Progress screen state. */
     uint64_t last_draw;     /**< timer_ticks() when the screen was last drawn. */
 } transfer_stream_t;
@@ -134,24 +137,34 @@ static int transfer_read_block(void *user, int controller, uint16_t address,
      * inconsistent value otherwise turns every confirmed operation into a
      * readiness timeout before a byte is transferred.
      *
-     * Preserve the authoritative POWERED, REMOVED and WAS_RESET bits. The
-     * latter remains visible to libtrpak, which can still re-select the mapper
-     * bank and retry a block after a real reset. Joybus failures also pass
-     * through unchanged. */
+     * Preserve the authoritative POWERED and REMOVED bits. WAS_RESET remains
+     * visible on its first high reading, so libtrpak can re-select the mapper
+     * bank and retry the affected block. Some hardware does not clear that bit
+     * on read as expected, though; turn a consecutive high level into one edge
+     * so one physical reset cannot exhaust libtrpak's 50-retry budget. Joybus
+     * failures pass through unchanged. */
     if (result == 0 && context != NULL && context->active &&
-        address == TP_STATUS_ADDRESS &&
-        (data[0] & TRPAK_STATUS_POWERED) != 0u &&
-        (data[0] & TRPAK_STATUS_REMOVED) == 0u &&
-        ((data[0] & TRPAK_STATUS_READY) == 0u ||
-         (data[0] & TRPAK_STATUS_IS_RESETTING) != 0u)) {
-        if (!context->status_compat_logged) {
+        address == TP_STATUS_ADDRESS) {
+        uint8_t raw_status = data[0];
+        bool readiness_fixed;
+        bool reset_suppressed;
+
+        data[0] = transfer_status_filter_active(
+            &context->status_filter, raw_status, &readiness_fixed,
+            &reset_suppressed);
+
+        if (reset_suppressed && !context->reset_compat_logged) {
+            debug_log(DEBUG_LEVEL_INFO,
+                      "Suppressing repeated reset status: 0x%02X\n",
+                      (unsigned int)raw_status);
+            context->reset_compat_logged = true;
+        }
+        if (readiness_fixed && !context->status_compat_logged) {
             debug_log(DEBUG_LEVEL_INFO,
                       "Ignoring inconsistent active status: 0x%02X\n",
-                      (unsigned int)data[0]);
+                      (unsigned int)raw_status);
             context->status_compat_logged = true;
         }
-        data[0] |= TRPAK_STATUS_READY;
-        data[0] &= (uint8_t)~TRPAK_STATUS_IS_RESETTING;
     }
 
     return result;

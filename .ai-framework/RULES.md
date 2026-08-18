@@ -36,6 +36,9 @@ decision-making.
 - Preserve `TRPAK_STATUS_WAS_RESET`. Reset recovery must still reselect the
   affected mapper bank, re-enable cartridge RAM when required, and retry the
   affected block.
+- Treat consecutive high readings of `TRPAK_STATUS_WAS_RESET` as one reset
+  event. Some hardware keeps this bit high instead of clearing it on read; a
+  low reading must re-arm detection of the next reset.
 - Never remove the active-transfer status compatibility logic without explicit
   evidence that all supported Transfer Pak revisions behave correctly and
   validation on real hardware.
@@ -51,7 +54,8 @@ decision-making.
   power set and no removal reported, an active transfer must continue when
   `READY` remains clear or `RESETTING` remains set.
 - Every transfer-related version change must also test cartridge removal,
-  power loss, Joybus failure, and `WAS_RESET` recovery.
+  power loss, Joybus failure, normal `WAS_RESET` recovery, and a sticky
+  `WAS_RESET` bit that remains high across consecutive status reads.
 - Do not release or bump the version when these regression checks fail. If real
   hardware testing is unavailable, record that limitation and keep the change
   unreleased until a responsible maintainer validates it.
