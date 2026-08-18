@@ -29,7 +29,7 @@ the cartridge and microSD state. All write operations require confirmation.
 
 Dump, backup, and restore screens show a 20-segment progress bar, percentage,
 transferred size, current transfer speed, estimated remaining time, and target
-path. The interface identifies the application as **GB Transfer Dumper v1.0**
+path. The interface identifies the application as **GB Transfer Dumper v1.0.1**
 by Alex Ishida.
 
 ROM dumps are written to `sd:/romdump` when that directory already exists;
@@ -42,15 +42,22 @@ Existing dumps are never overwritten: the program first tries `TITLE.ext`,
 then `TITLE-01.ext`, and so on. A partial file is removed if reading or writing
 fails. Save restoration scans the active save location for a `.sav` file,
 verifies that its size matches the inserted cartridge's RAM, and then asks for
-confirmation before overwriting the cartridge save. When more than one `.sav`
-file exists, the first one returned by the filesystem is used.
+confirmation before overwriting the cartridge save. When several `.sav` files
+are present, a backup this program created for the inserted cartridge
+(`TITLE.sav` or `TITLE-NN.sav`) is preferred; otherwise the first `.sav` the
+filesystem returns is used. The extension is matched case-insensitively.
 
 ## Safety and reliability
 
-- Cartridge presence and power are checked throughout each transfer; initial
-  readiness and reset handling are delegated to libtrpak;
-- the application uses a 4 KiB streaming buffer, so it does not need to hold a
-  complete ROM in N64 memory;
+- Cartridge presence, power and readiness are verified by libtrpak on both
+  sides of every 32-byte transaction, so a cartridge pulled out mid-transfer
+  aborts the operation instead of filling the file with whatever the bus
+  returned;
+- a Transfer Pak reset during a transfer re-selects the affected bank, re-opens
+  cartridge RAM and repeats the block that was in flight; repeated resets end
+  the operation with a readiness timeout rather than a silently wrong file;
+- the application streams every transfer through a 4 KiB file buffer, so it
+  does not need to hold a complete ROM in N64 memory;
 - failed ROM or save backups remove their incomplete output file whenever
   possible;
 - save restore rejects cartridges without RAM and files whose size differs from
@@ -68,20 +75,36 @@ file exists, the first one returned by the filesystem is used.
 
 Do not remove the cartridge or Transfer Pak while an operation is in progress.
 
+## Source layout
+
+| File | Responsibility |
+| ---- | -------------- |
+| `src/main.c` | Menu, information screen, and the dump/restore flows. |
+| `src/cart.c` | Transfer Pak power lifecycle and cartridge metadata. |
+| `src/storage.c` | microSD mounting, dump directories, file naming and lookup. |
+| `src/transfer.c` | libtrpak streaming backend: ROM dump, save backup, save restore. |
+| `src/ui.c` | Console screens, controller input, progress rendering. |
+| `src/app.c` | Error strings and debug logging shared by the modules. |
+
+The Makefile compiles every `src/*.c`, so a new module needs no build changes.
+
 ## Stack and dependencies
 
 - [libdragon](https://github.com/DragonMinded/libdragon), supplied by the N64
   toolchain;
 - [libtrpak](https://github.com/alexishida/libtrpak), downloaded by the
-  Makefile and pinned to commit `22aa35fb928247686b0f9dbcdf3f901768c96d70`.
+  Makefile and pinned to commit `4a55f4d567ee0cbbf805982089fdd5d325a72617`.
 
 The Makefile downloads libtrpak into `.deps/libtrpak` on the first build.
 The entire `.deps/` directory is generated locally and is intentionally ignored
 by Git.
 
-The program uses libtrpak's public banking/block API and streams data to the
-microSD card. It therefore does not need to keep an entire ROM in RDRAM and
-does not require an Expansion Pak for 4 or 8 MiB dumps.
+Transfers are performed by libtrpak's bulk helpers, with each 32-byte block
+routed to or from the microSD card through the streaming callbacks in
+`src/transfer.c`. The program therefore does not keep an entire ROM in RDRAM,
+does not require an Expansion Pak for 4 or 8 MiB dumps, and inherits libtrpak's
+bank traversal, mapper limits, reset recovery and MBC2 nibble handling instead
+of reimplementing them.
 
 ## Installing libdragon (Linux / WSL2)
 
@@ -140,14 +163,27 @@ make clean
 
 ## libtrpak limitations
 
-- MMM01, MBC4, TAMA5, and HuC3 are detected but do not have banking support;
-- MBC1 cartridges above 128 banks and HuC1 cartridges above 64 banks are
-  rejected to prevent incomplete dumps;
+- MMM01, MBC4, TAMA5, and HuC3 are decoded and named on the information screen,
+  but have no banking implementation and are refused for dumping;
+- a header declaring more banks than its mapper can select is refused before
+  any data moves, instead of producing a truncated or duplicated image: ROM
+  beyond 2 banks without an MBC, 16 on MBC2, 64 on HuC1, the Game Boy Camera
+  and MBC1M, 128 on MBC1 and MBC3, 512 on MBC5; save RAM beyond 1 bank on MBC2
+  and MBC1M, 4 on MBC1 and HuC1, 8 on MBC3 and rumble MBC5, 16 on MBC5 and the
+  Game Boy Camera;
+- 1 MiB MBC1 multicarts are recognised by probing for the repeated header at
+  bank `0x10` and traversed with the MBC1M layout; their save RAM is limited to
+  the single fixed bank that wiring exposes;
+- a cartridge whose type byte claims RAM while its size code is `0` is treated
+  as RAM-less: the ROM is still dumped, and the save entries report that there
+  is no save RAM;
 - Game Boy Camera and HuC1 remain experimental paths;
 - RTC and rumble are detected only; they are not separately backed up or
   restored;
-- `Restore Save` automatically chooses the first `.sav` file returned from
-  `sd:/savedump` (or `sd:/` when that directory is absent), so keep only the
-  intended save there before restoring;
+- `Restore Save` prefers a `.sav` that this program created for the inserted
+  cartridge and otherwise falls back to the first `.sav` returned from
+  `sd:/savedump` (or `sd:/` when that directory is absent). A save that came
+  from another tool, or one renamed by hand, is only matched by size, so
+  confirm the displayed path before restoring;
 - restoring a save overwrites cartridge RAM. Confirm that the displayed file
   and cartridge are correct before accepting the warning.

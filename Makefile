@@ -2,7 +2,7 @@ BUILD_DIR := build
 SOURCE_DIR := src
 
 LIBTRPAK_REPOSITORY := https://github.com/alexishida/libtrpak.git
-LIBTRPAK_COMMIT := 22aa35fb928247686b0f9dbcdf3f901768c96d70
+LIBTRPAK_COMMIT := 4a55f4d567ee0cbbf805982089fdd5d325a72617
 LIBTRPAK_DIR := .deps/libtrpak
 LIBTRPAK_STAMP := $(LIBTRPAK_DIR)/.checked-out-$(LIBTRPAK_COMMIT)
 
@@ -11,8 +11,11 @@ include $(N64_INST)/include/n64.mk
 CFLAGS += -I$(LIBTRPAK_DIR)
 
 ROM := gb-transf-dumper.z64
-OBJS := \
-	$(BUILD_DIR)/main.o \
+
+# Every application source is compiled by n64.mk's own $(BUILD_DIR)/%.o rule,
+# so new files under src/ are picked up without editing this list.
+SOURCES := $(wildcard $(SOURCE_DIR)/*.c)
+OBJS := $(patsubst $(SOURCE_DIR)/%.c,$(BUILD_DIR)/%.o,$(SOURCES)) \
 	$(BUILD_DIR)/libtrpak.o
 
 .PHONY: all clean
@@ -43,7 +46,9 @@ $(BUILD_DIR)/libtrpak.o: $(LIBTRPAK_DIR)/libtrpak.c $(LIBTRPAK_DIR)/libtrpak.h
 	@echo "    [CC] $<"
 	$(CC) -c $(CFLAGS) -o $@ $<
 
-$(BUILD_DIR)/main.o: src/main.c $(LIBTRPAK_DIR)/libtrpak.h
+# Prerequisite-only rule: it makes the dependency checkout happen before any
+# application source is compiled, while leaving n64.mk's recipe in charge.
+$(OBJS): $(LIBTRPAK_DIR)/libtrpak.h
 
 clean:
 	rm -rf $(BUILD_DIR) $(ROM) *.v64 *.n64
