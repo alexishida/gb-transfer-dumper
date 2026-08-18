@@ -3,4 +3,4 @@ build/
 *.z64
 *.v64
 *.n64
-
+*:Zone.Identifier

@@ -1,11 +1,17 @@
 # GB Transfer Dumper
 
+<p>
+  <img src="docs/screenshot.jpg" alt="GB Transfer Dumper main menu running on Nintendo 64" height="240">
+  <img src="docs/screenshot-info.jpg" alt="GB Transfer Dumper cartridge information screen for Pokémon Crystal" height="240">
+  <img src="docs/screenshot-dump.jpg" alt="GB Transfer Dumper dumping Pokémon Crystal ROM on a television" height="240">
+  <img src="docs/screenshot-transferpak.jpg" alt="Pokémon Crystal cartridge connected to an N64 controller through a Transfer Pak" height="240">
+  <img src="docs/screenshot-save-sync.jpg" alt="Pokémon Crystal save running on a Game Boy Color after emulator synchronization" height="240">
+</p>
+
 Created by Alex Ishida.
 
 An N64 homebrew utility that copies ROM and RAM from a Game Boy or Game Boy
 Color cartridge to a SummerCart64 microSD card through a Transfer Pak.
-
-<img src="docs/screenshot.jpg" alt="GB Transfer Dumper running on Nintendo 64" width="300">
 
 The menu provides:
 
