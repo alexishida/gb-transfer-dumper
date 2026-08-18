@@ -60,8 +60,9 @@ filesystem returns is used. The extension is matched case-insensitively.
   does not need to hold a complete ROM in N64 memory;
 - failed ROM or save backups remove their incomplete output file whenever
   possible;
-- save restore rejects cartridges without RAM and files whose size differs from
-  the cartridge RAM capacity, and verifies every block after writing it;
+- save restore rejects cartridges without RAM and incompatible file sizes,
+  accepts standard 44-byte or 48-byte emulator RTC trailers on RTC cartridges,
+  restores only the SRAM payload, and verifies every block after writing it;
 - debug logging for transfer, filesystem, and hardware errors is available
   when the program is built with `ENABLE_DEBUG`.
 

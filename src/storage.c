@@ -8,12 +8,14 @@
 
 #include <dir.h>
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 
 #include "app.h"
 #include "cart.h"
+#include "save_format.h"
 
 #define ROM_DUMP_DIRECTORY      "sd:/romdump"
 #define SAVE_DUMP_DIRECTORY     "sd:/savedump"
@@ -293,10 +295,18 @@ int storage_validate_save_file(const char *path)
         return APP_ERR_FILE_NOT_FOUND;
     }
     if (status.st_size < 0 ||
-        (unsigned long long)status.st_size != (unsigned long long)trcart.ramsize) {
+        !save_format_size_is_compatible(
+            (uint64_t)status.st_size, (uint64_t)trcart.ramsize,
+            trcart.rtc != 0u)) {
         debug_log(DEBUG_LEVEL_ERROR, "File size mismatch: %lu vs %lu\n",
                   (unsigned long)status.st_size, (unsigned long)trcart.ramsize);
         return APP_ERR_FILE_SIZE_MISMATCH;
+    }
+    if ((uint64_t)status.st_size > (uint64_t)trcart.ramsize) {
+        debug_log(DEBUG_LEVEL_INFO,
+                  "Ignoring %lu-byte emulator RTC trailer\n",
+                  (unsigned long)((uint64_t)status.st_size -
+                                  (uint64_t)trcart.ramsize));
     }
     debug_log(DEBUG_LEVEL_INFO, "Restore file validated: %s (%lu bytes)\n",
               path, (unsigned long)status.st_size);

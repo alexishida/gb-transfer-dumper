@@ -16,6 +16,7 @@ CFLAGS += -I$(LIBTRPAK_DIR)
 
 ROM := gb-transf-dumper.z64
 STATUS_TEST := $(BUILD_DIR)/test-transfer-status
+SAVE_FORMAT_TEST := $(BUILD_DIR)/test-save-format
 
 # Every application source is compiled by n64.mk's own $(BUILD_DIR)/%.o rule,
 # so new files under src/ are picked up without editing this list.
@@ -27,8 +28,9 @@ OBJS := $(patsubst $(SOURCE_DIR)/%.c,$(BUILD_DIR)/%.o,$(SOURCES)) \
 
 all: $(ROM)
 
-test: $(STATUS_TEST)
+test: $(STATUS_TEST) $(SAVE_FORMAT_TEST)
 	./$(STATUS_TEST)
+	./$(SAVE_FORMAT_TEST)
 
 $(ROM): N64_ROM_TITLE = "GB Transfer Dumper"
 $(ROM): N64_ROM_REGIONFREE = true
@@ -61,6 +63,14 @@ $(STATUS_TEST): $(TEST_DIR)/test_transfer_status.c \
 	@echo "    [HOST-TEST] $@"
 	$(HOST_CC) $(HOST_CFLAGS) -I$(LIBTRPAK_DIR) -I$(SOURCE_DIR) \
 		$(SOURCE_DIR)/transfer_status.c $(TEST_DIR)/test_transfer_status.c \
+		-o $@
+
+$(SAVE_FORMAT_TEST): $(TEST_DIR)/test_save_format.c \
+		$(SOURCE_DIR)/save_format.c $(SOURCE_DIR)/save_format.h
+	@mkdir -p $(dir $@)
+	@echo "    [HOST-TEST] $@"
+	$(HOST_CC) $(HOST_CFLAGS) -I$(SOURCE_DIR) \
+		$(SOURCE_DIR)/save_format.c $(TEST_DIR)/test_save_format.c \
 		-o $@
 
 # Prerequisite-only rule: it makes the dependency checkout happen before any

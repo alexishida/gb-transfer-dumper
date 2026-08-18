@@ -57,8 +57,9 @@ int transfer_dump_ram(FILE *file, const char *path, size_t *bytes_written);
 /**
  * @brief Writes a save file back into cartridge RAM, verifying every block.
  *
- * The caller must have already checked that the file is exactly
- * `trcart.ramsize` bytes long.
+ * The caller must have already validated the file. Only the leading
+ * `trcart.ramsize` bytes are written; a recognized emulator RTC trailer is
+ * intentionally ignored because it is not cartridge RAM.
  *
  * @param file       Source stream, opened for binary reading.
  * @param path       Path shown on the progress screen.

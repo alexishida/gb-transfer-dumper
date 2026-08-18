@@ -86,8 +86,11 @@ bool storage_find_save_file(const char *directory, char *path, size_t path_size)
 /**
  * @brief Checks that a save file matches the inserted cartridge's RAM size.
  *
+ * RTC cartridges also accept recognized 44-byte or 48-byte emulator RTC
+ * trailers after the SRAM payload. The restore path ignores that trailer.
+ *
  * @param path File to inspect.
- * @retval TRPAK_OK                    Size matches `trcart.ramsize`.
+ * @retval TRPAK_OK                    SRAM payload and optional RTC trailer match.
  * @retval APP_ERR_FILE_NOT_FOUND      The file could not be inspected.
  * @retval APP_ERR_FILE_SIZE_MISMATCH  The size differs from the cartridge RAM.
  */

@@ -60,6 +60,16 @@ decision-making.
   hardware testing is unavailable, record that limitation and keep the change
   unreleased until a responsible maintainer validates it.
 
+# Save File Compatibility Rules
+
+- Plain save files must match the inserted cartridge's RAM capacity exactly.
+- RTC cartridges may also accept recognized 44-byte or 48-byte MBC3 emulator
+  RTC trailers after the SRAM payload. Restore only the SRAM bytes; never write
+  footer data into cartridge RAM.
+- Do not accept arbitrary oversized files. Test exact-size saves, both known
+  RTC trailer sizes, undersized files, unknown extra data, and RTC trailers on
+  cartridges that do not declare an RTC.
+
 # Guard Rails
 
 - Do not run commands directly in production. When needed, provide the command
