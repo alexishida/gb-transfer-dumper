@@ -27,6 +27,9 @@
  * console render, which would otherwise be paid once per 32-byte block. */
 #define PROGRESS_INTERVAL_MS 200u
 
+/* Transfer Pak register whose reads return the accessory status byte. */
+#define TP_STATUS_ADDRESS 0xB000u
+
 /**
  * @brief The file one transfer streams through, plus its progress state.
  *
@@ -41,6 +44,8 @@ typedef struct {
     size_t total;           /**< Highest offset reached, for the progress bar. */
     uint32_t checksum;      /**< Running CRC32 of everything stored. */
     int error;              /**< First file error, or ::TRPAK_OK. */
+    bool active;            /**< True only while a bulk transfer is running. */
+    bool status_compat_logged; /**< Prevents repeated status workaround logs. */
     ui_progress_t progress; /**< Progress screen state. */
     uint64_t last_draw;     /**< timer_ticks() when the screen was last drawn. */
 } transfer_stream_t;
@@ -119,8 +124,37 @@ static bool seek_stream(transfer_stream_t *context, size_t offset)
 static int transfer_read_block(void *user, int controller, uint16_t address,
                                uint8_t data[TRPAK_TRANSFER_BLOCK_SIZE])
 {
-    (void)user;
-    return joybus_accessory_read(controller, address, data);
+    transfer_stream_t *context = (transfer_stream_t *)user;
+    int result = joybus_accessory_read(controller, address, data);
+
+    /* trpak_init() performs the strict readiness handshake before a stream is
+     * armed. During active access, however, some Transfer Pak revisions keep
+     * READY clear or RESETTING set even though block I/O continues to work.
+     * libtrpak 4a55f4d polls those advisory bits around every block, so the
+     * inconsistent value otherwise turns every confirmed operation into a
+     * readiness timeout before a byte is transferred.
+     *
+     * Preserve the authoritative POWERED, REMOVED and WAS_RESET bits. The
+     * latter remains visible to libtrpak, which can still re-select the mapper
+     * bank and retry a block after a real reset. Joybus failures also pass
+     * through unchanged. */
+    if (result == 0 && context != NULL && context->active &&
+        address == TP_STATUS_ADDRESS &&
+        (data[0] & TRPAK_STATUS_POWERED) != 0u &&
+        (data[0] & TRPAK_STATUS_REMOVED) == 0u &&
+        ((data[0] & TRPAK_STATUS_READY) == 0u ||
+         (data[0] & TRPAK_STATUS_IS_RESETTING) != 0u)) {
+        if (!context->status_compat_logged) {
+            debug_log(DEBUG_LEVEL_INFO,
+                      "Ignoring inconsistent active status: 0x%02X\n",
+                      (unsigned int)data[0]);
+            context->status_compat_logged = true;
+        }
+        data[0] |= TRPAK_STATUS_READY;
+        data[0] &= (uint8_t)~TRPAK_STATUS_IS_RESETTING;
+    }
+
+    return result;
 }
 
 /** @brief Default write primitive: libdragon's Joybus accessory write. */
@@ -270,6 +304,7 @@ static int begin_stream(FILE *file, const char *operation, const char *path,
     stream.file = file;
     stream.checksum = 0xFFFFFFFFu;
     stream.error = TRPAK_OK;
+    stream.active = true;
     /* Batch the 32-byte blocks into microSD-sized accesses. The buffer is
      * static because it has to outlive the fclose() the caller performs. */
     setvbuf(file, stream_buffer, _IOFBF, sizeof(stream_buffer));
@@ -303,6 +338,7 @@ static int finish_stream(int result, const char *label)
                       (unsigned int)~stream.checksum);
         }
     }
+    stream.active = false;
     stream.file = NULL;
     return result;
 }
