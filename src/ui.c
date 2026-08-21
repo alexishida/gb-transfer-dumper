@@ -29,6 +29,7 @@ void ui_draw_footer(const char *controls)
 {
     printf("\n%s\n", controls);
     printf("%s | SC64 + Transfer Pak v%s\n", APP_AUTHOR, APP_VERSION);
+    printf("libtrpak v%s\n", trpak_version_string());
 }
 
 const char *ui_yes_no(bool value)

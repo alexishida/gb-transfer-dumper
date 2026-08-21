@@ -103,7 +103,7 @@ The Makefile compiles every `src/*.c`, so a new module needs no build changes.
 - [libdragon](https://github.com/DragonMinded/libdragon), supplied by the N64
   toolchain;
 - [libtrpak](https://github.com/alexishida/libtrpak), downloaded by the
-  Makefile and pinned to commit `4a55f4d567ee0cbbf805982089fdd5d325a72617`.
+  Makefile and pinned to commit `d3d5a95af1d8261488df474512a8d8f9685a7770`.
 
 The Makefile downloads libtrpak into `.deps/libtrpak` on the first build.
 The entire `.deps/` directory is generated locally and is intentionally ignored

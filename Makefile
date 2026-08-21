@@ -6,7 +6,7 @@ HOST_CC ?= cc
 HOST_CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror -pedantic
 
 LIBTRPAK_REPOSITORY := https://github.com/alexishida/libtrpak.git
-LIBTRPAK_COMMIT := 4a55f4d567ee0cbbf805982089fdd5d325a72617
+LIBTRPAK_COMMIT := d3d5a95af1d8261488df474512a8d8f9685a7770
 LIBTRPAK_DIR := .deps/libtrpak
 LIBTRPAK_STAMP := $(LIBTRPAK_DIR)/.checked-out-$(LIBTRPAK_COMMIT)
 

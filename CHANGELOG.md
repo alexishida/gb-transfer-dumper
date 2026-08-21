@@ -4,6 +4,22 @@ All notable changes to GB Transfer Dumper are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Dependency:** Updated libtrpak to
+  [`d3d5a95`](https://github.com/alexishida/libtrpak/commit/d3d5a95af1d8261488df474512a8d8f9685a7770),
+  libtrpak's 1.0.0 release, which finally publishes the `TRPAK_VERSION` constant
+  and the `trpak_version()` / `trpak_version_string()` accessors.
+- **Footer:** The version line now also shows the libtrpak version, printed from
+  `trpak_version_string()`.
+
+### Note
+
+- This dependency update is not released yet: it must first be validated on real
+  Transfer Pak hardware by a responsible maintainer.
+
 ## [1.0.2] - 2026-08-20
 
 ### Added
