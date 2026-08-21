@@ -35,14 +35,16 @@ the cartridge and microSD state. All write operations require confirmation.
 
 Dump, backup, and restore screens show a 20-segment progress bar, percentage,
 transferred size, current transfer speed, estimated remaining time, and target
-path. The interface identifies the application as **GB Transfer Dumper v1.0.1**
+path. The interface identifies the application as **GB Transfer Dumper v1.0.2**
 by Alex Ishida.
 
 ROM dumps are written to `sd:/romdump` when that directory already exists;
-save backups and restores use `sd:/savedump` when it exists. Current libdragon
-SD filesystem builds cannot create directories, so an operation automatically
-writes to or reads from `sd:/` when its respective directory is absent. Create
-both directories on the microSD card to keep ROMs and saves organized.
+save backups and restores use `sd:/savedump` when it exists. Existing
+directories are detected by listing the card, so an empty directory is used
+just as well as a populated one. Current libdragon SD filesystem builds cannot
+create directories, so an operation automatically writes to or reads from
+`sd:/` when its respective directory is absent. Create both directories on the
+microSD card to keep ROMs and saves organized.
 
 Existing dumps are never overwritten: the program first tries `TITLE.ext`,
 then `TITLE-01.ext`, and so on. A partial file is removed if reading or writing
@@ -76,8 +78,9 @@ filesystem returns is used. The extension is matched case-insensitively.
 
 - Nintendo 64;
 - SummerCart64 with a microSD card;
-- Nintendo 64 controller connected to port 1;
-- Transfer Pak (NUS-019);
+- Nintendo 64 controller connected to port 1 to drive the menus;
+- Transfer Pak (NUS-019) in any controller port: `Info` probes ports 1-4, so
+  the Transfer Pak can stay safely in a spare port while port 1 navigates;
 - Game Boy or Game Boy Color cartridge.
 
 Do not remove the cartridge or Transfer Pak while an operation is in progress.

@@ -8,7 +8,7 @@
  * flows that tie the cartridge, storage, transfer and UI modules together.
  *
  * Author: Alex Ishida
- * Version: 1.0.1
+ * Version: 1.0.2
  * License: MIT
  */
 
@@ -240,13 +240,14 @@ static void draw_info(int result)
     if (result != TRPAK_OK) {
         printf("Cartridge : Not ready\n");
         printf("Status    : %s\n", app_error_string(result));
-        printf("\nCheck controller port 1, Transfer Pak,\n");
+        printf("\nCheck controller ports 1-4, Transfer Pak,\n");
         printf("and the Game Boy cartridge.\n");
         ui_draw_footer("START: refresh       B: back");
         console_render();
         return;
     }
 
+    printf("Controller %d\n", cart_controller_port() + 1);
     printf("Title      %s\n", cart_title());
     printf("System     %s\n", cart_system_name());
     printf("Type       0x%02X  %s\n", (unsigned int)trcart.cartridge_type,

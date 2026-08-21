@@ -55,6 +55,7 @@ typedef struct {
 
 static transfer_stream_t stream;
 static char stream_buffer[STREAM_BUFFER_SIZE];
+static trpak_io stream_io;
 static bool backend_installed;
 
 /**
@@ -274,20 +275,25 @@ static int transfer_load(void *user, uint8_t *destination, uintptr_t source,
 
 int transfer_init(void)
 {
-    const trpak_io io = {
-        .read_block = transfer_read_block,
-        .write_block = transfer_write_block,
-        .delay = transfer_delay,
-        .dma_store = transfer_store,
-        .dma_load = transfer_load,
-        .user = &stream
-    };
-    int result = trpak_configure_io(&io, JOYPAD_PORT_1, STREAM_BASE);
+    memset(&stream_io, 0, sizeof(stream_io));
+    stream_io.read_block = transfer_read_block;
+    stream_io.write_block = transfer_write_block;
+    stream_io.delay = transfer_delay;
+    stream_io.dma_store = transfer_store;
+    stream_io.dma_load = transfer_load;
+    stream_io.user = &stream;
+
+    int result = trpak_configure_io(&stream_io, JOYPAD_PORT_1, STREAM_BASE);
 
     backend_installed = result == TRPAK_OK;
     debug_log(backend_installed ? DEBUG_LEVEL_INFO : DEBUG_LEVEL_ERROR,
               "Streaming backend installation: %d\n", result);
     return result;
+}
+
+int transfer_configure_port(int controller)
+{
+    return trpak_configure_io(&stream_io, controller, STREAM_BASE);
 }
 
 /**

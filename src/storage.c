@@ -31,6 +31,13 @@ static bool sd_ready;
 static const char *rom_directory = DUMP_DIRECTORY_FALLBACK;
 static const char *save_directory = DUMP_DIRECTORY_FALLBACK;
 
+/** @brief Outcome of probing a candidate dump directory. */
+typedef enum {
+    DUMP_PATH_IS_DIRECTORY,    /**< Exists and is really a directory. */
+    DUMP_PATH_NOT_A_DIRECTORY, /**< Exists, but is a regular file. */
+    DUMP_PATH_MISSING          /**< No such directory entry. */
+} dump_path_status;
+
 int storage_ensure_sd(void)
 {
     if (sd_ready) {
@@ -56,43 +63,114 @@ const char *storage_directory(storage_kind kind)
     return kind == STORAGE_KIND_SAVE ? save_directory : rom_directory;
 }
 
+/** @brief Case-insensitive comparison of a directory entry name against a
+ *         known component, matching FAT's case-insensitive directory lookup. */
+static bool entry_name_equals(const dir_t *entry, const char *name)
+{
+    size_t i;
+
+    if (entry->d_name[0] == '\0') {
+        return false;
+    }
+    for (i = 0u; name[i] != '\0'; i++) {
+        char wanted = name[i];
+        char candidate = entry->d_name[i];
+
+        if (wanted >= 'A' && wanted <= 'Z') {
+            wanted = (char)(wanted - 'A' + 'a');
+        }
+        if (candidate >= 'A' && candidate <= 'Z') {
+            candidate = (char)(candidate - 'A' + 'a');
+        }
+        if (wanted != candidate) {
+            return false;
+        }
+    }
+    return entry->d_name[i] == '\0';
+}
+
+/**
+ * @brief Decides how a candidate dump directory path is present on the card.
+ *
+ * libdragon's FAT backend registers no fs->stat, so stat() on a directory path
+ * falls back to opening it read-only, which FatFs refuses with FR_NO_FILE
+ * (ENOENT) even when the directory exists, and dir_findfirst() reports -1 both
+ * for a directory that is empty and for a path that does not exist. The two
+ * remaining cases are told apart by listing the parent directory and looking
+ * for the candidate's final component.
+ *
+ * @param directory Path to test, e.g. "sd:/romdump".
+ * @return One of the ::dump_path_status values.
+ */
+static dump_path_status probe_dump_path(const char *directory)
+{
+    char parent[APP_PATH_SIZE];
+    const char *name;
+    size_t length = strlen(directory);
+    size_t slash;
+    dir_t entry;
+    int result;
+
+    /* Fast path: a directory with at least one entry opens and lists. */
+    if (dir_findfirst(directory, &entry) == 0) {
+        return DUMP_PATH_IS_DIRECTORY;
+    }
+
+    /* Split the path into its parent and its final component. */
+    slash = length;
+    while (slash > 0u && directory[slash - 1u] != '/') {
+        slash--;
+    }
+    if (slash == 0u || slash >= length) {
+        return DUMP_PATH_MISSING;
+    }
+    memcpy(parent, directory, slash);
+    parent[slash] = '\0';
+    name = &directory[slash];
+
+    result = dir_findfirst(parent, &entry);
+    if (result == 0) {
+        do {
+            if (entry_name_equals(&entry, name)) {
+                return entry.d_type == DT_DIR
+                    ? DUMP_PATH_IS_DIRECTORY
+                    : DUMP_PATH_NOT_A_DIRECTORY;
+            }
+            result = dir_findnext(parent, &entry);
+        } while (result == 0);
+    }
+    return DUMP_PATH_MISSING;
+}
+
 int storage_ensure_directory(storage_kind kind)
 {
     const char *directory = kind == STORAGE_KIND_SAVE
         ? SAVE_DUMP_DIRECTORY : ROM_DUMP_DIRECTORY;
     const char **active = kind == STORAGE_KIND_SAVE
         ? &save_directory : &rom_directory;
-    struct stat status;
+    dump_path_status status;
     int result = storage_ensure_sd();
 
     if (result != TRPAK_OK) {
         return result;
     }
 
-    /* stat() is only required to set errno when it fails, and the SD backend
-     * may leave it untouched, so clear it first rather than trust a value
-     * carried over from an unrelated call. */
-    errno = 0;
-    if (stat(directory, &status) == 0) {
-        if (S_ISDIR(status.st_mode)) {
-            *active = directory;
-            return TRPAK_OK;
-        }
+    status = probe_dump_path(directory);
+    if (status == DUMP_PATH_IS_DIRECTORY) {
+        *active = directory;
+        debug_log(DEBUG_LEVEL_INFO, "Dump path: %s\n", directory);
+        return TRPAK_OK;
+    }
+    if (status == DUMP_PATH_NOT_A_DIRECTORY) {
         debug_log(DEBUG_LEVEL_ERROR,
                   "Dump path exists but is not a directory: %s\n", directory);
         return APP_ERR_SD_DIRECTORY;
     }
 
-    if (errno == ENOENT || errno == 0) {
-        *active = DUMP_DIRECTORY_FALLBACK;
-        debug_log(DEBUG_LEVEL_INFO, "%s does not exist; writing to %s\n",
-                  directory, *active);
-        return TRPAK_OK;
-    }
-
-    debug_log(DEBUG_LEVEL_ERROR, "Unable to inspect directory %s: %s\n",
-              directory, strerror(errno));
-    return APP_ERR_SD_DIRECTORY;
+    *active = DUMP_DIRECTORY_FALLBACK;
+    debug_log(DEBUG_LEVEL_INFO, "%s does not exist; writing to %s\n",
+              directory, *active);
+    return TRPAK_OK;
 }
 
 /**

@@ -15,7 +15,7 @@
 
 #define APP_NAME    "GB Transfer Dumper"
 #define APP_AUTHOR  "Alex Ishida"
-#define APP_VERSION "1.0.1"
+#define APP_VERSION "1.0.2"
 
 /* Longest absolute path the application ever builds or accepts. */
 #define APP_PATH_SIZE 128

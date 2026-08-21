@@ -27,6 +27,21 @@
 int transfer_init(void);
 
 /**
+ * @brief Points the streaming backend at another controller port.
+ *
+ * libtrpak keeps one global runtime and talks to the single port configured
+ * with trpak_configure_io(), so this is how cart_refresh() probes ports 1-4
+ * for a Transfer Pak. It must be called before every trpak_init(). Do not call
+ * it while a bulk transfer is running: reconfiguring then would clear the
+ * MBC1M detection that trpak_init() performed.
+ *
+ * @param controller Controller port index, `0` (port 1) through `3` (port 4).
+ * @retval TRPAK_OK Port configured.
+ * @retval TRPAK_ERR_INVALID_ARGUMENT Out-of-range port, or no backend yet.
+ */
+int transfer_configure_port(int controller);
+
+/**
  * @brief Streams the whole cartridge ROM into an open file.
  *
  * @param file          Destination stream, opened for binary writing.

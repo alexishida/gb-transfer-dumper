@@ -4,6 +4,21 @@ All notable changes to GB Transfer Dumper are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-08-20
+
+### Added
+
+- **Transfer Pak detection on all controller ports:** `Info` now probes
+  controller ports 1-4 instead of only port 1, so the Transfer Pak can sit in
+  a spare port while port 1 drives the menus.
+
+### Fixed
+
+- **Dump directories:** `sd:/romdump` and `sd:/savedump` are now used even
+  when they are empty. libdragon's FAT backend cannot `stat()` a directory, so
+  the card's directory listing is used to tell an existing directory apart
+  from a missing one, preventing dumps from silently falling back to `sd:/`.
+
 ## [1.0.1] - 2026-08-17
 
 ### Fixed

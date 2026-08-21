@@ -3,7 +3,9 @@
  *
  * Current libdragon SD filesystem builds cannot create directories, so each
  * dump kind uses its dedicated directory when it already exists and silently
- * falls back to the card root when it does not.
+ * falls back to the card root when it does not. Existence is detected by
+ * listing the card because libdragon's FAT backend cannot stat() a directory,
+ * and an empty directory must be recognized as much as a populated one.
  */
 
 #ifndef STORAGE_H
@@ -32,6 +34,10 @@ bool storage_is_ready(void);
 
 /**
  * @brief Mounts the card and resolves the active directory for a dump kind.
+ *
+ * Uses directory listing rather than stat(), because libdragon's FAT backend
+ * cannot stat() a directory; a directory that exists but is empty is still
+ * detected correctly.
  *
  * @param kind Which directory to resolve.
  * @retval TRPAK_OK              Directory resolved; see storage_directory().

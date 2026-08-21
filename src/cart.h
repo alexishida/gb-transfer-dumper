@@ -20,11 +20,13 @@
 /**
  * @brief Powers the Transfer Pak up and re-reads the cartridge header.
  *
- * Any previously powered cartridge is shut down first, so the result always
- * describes the cartridge present right now.
+ * Any previously powered cartridge is shut down first. Every controller port
+ * (1-4) is probed in order until one carries a Transfer Pak with a readable
+ * cartridge, so the accessory can live in a spare port while port 1 drives
+ * the menus.
  *
- * @return ::TRPAK_OK when the cartridge was identified, otherwise the libtrpak
- *         failure code from trpak_init().
+ * @return ::TRPAK_OK when a cartridge was identified, otherwise the libtrpak
+ *         failure code from the last trpak_init() attempt.
  */
 int cart_refresh(void);
 
@@ -36,6 +38,9 @@ bool cart_is_active(void);
 
 /** @brief True once a cartridge header has been read successfully. */
 bool cart_is_known(void);
+
+/** @brief Controller port index where the Transfer Pak was last found. */
+int cart_controller_port(void);
 
 /** @brief Cartridge title, or a placeholder when the header carries none. */
 const char *cart_title(void);

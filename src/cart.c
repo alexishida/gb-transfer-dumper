@@ -9,9 +9,11 @@
 #include <string.h>
 
 #include "app.h"
+#include "transfer.h"
 
 static bool cart_active;
 static bool cart_known;
+static int cart_controller = JOYPAD_PORT_1;
 
 void cart_shutdown(void)
 {
@@ -24,20 +26,45 @@ void cart_shutdown(void)
 
 int cart_refresh(void)
 {
-    int result;
+    int result = TRPAK_ERR_NO_CARTRIDGE;
+    int port;
 
     cart_shutdown();
 
-    result = trpak_init();
-    if (result == TRPAK_OK) {
-        cart_active = true;
-        cart_known = true;
-        debug_log(DEBUG_LEVEL_INFO, "Cartridge initialized: %s\n", cart_title());
-    } else {
-        cart_active = false;
-        cart_known = false;
-        debug_log(DEBUG_LEVEL_ERROR, "Cartridge init failed: %d\n", result);
+    /* libtrpak drives the one Transfer Pak port configured with
+     * trpak_configure_io(), so this application scans every controller port
+     * on each refresh: the Transfer Pak usually rides on the menu controller
+     * (port 1), but it may safely sit in a spare port while port 1 stays free
+     * for navigation. The first port whose full bring-up handshake succeeds
+     * wins, and that port keeps the backend through the following transfer. */
+    for (port = JOYPAD_PORT_1; port < JOYPAD_PORT_COUNT; port++) {
+        result = transfer_configure_port(port);
+        if (result != TRPAK_OK) {
+            debug_log(DEBUG_LEVEL_ERROR,
+                      "Failed to configure controller port %d: %d\n",
+                      port + 1, result);
+            continue;
+        }
+
+        result = trpak_init();
+        if (result == TRPAK_OK) {
+            cart_controller = port;
+            cart_active = true;
+            cart_known = true;
+            debug_log(DEBUG_LEVEL_INFO,
+                      "Cartridge initialized on controller port %d: %s\n",
+                      port + 1, cart_title());
+            return TRPAK_OK;
+        }
+        debug_log(DEBUG_LEVEL_VERBOSE,
+                  "No Transfer Pak on controller port %d: %s (%d)\n",
+                  port + 1, app_error_string(result), result);
     }
+
+    cart_active = false;
+    cart_known = false;
+    debug_log(DEBUG_LEVEL_ERROR, "Cartridge init failed on all ports: %d\n",
+              result);
     return result;
 }
 
@@ -49,6 +76,11 @@ bool cart_is_active(void)
 bool cart_is_known(void)
 {
     return cart_known;
+}
+
+int cart_controller_port(void)
+{
+    return cart_controller;
 }
 
 bool cart_has_ram(void)
