@@ -4,7 +4,13 @@ All notable changes to GB Transfer Dumper are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.2] - 2026-08-20
+
+### Added
+
+- **Transfer Pak detection on all controller ports:** `Info` now probes
+  controller ports 1-4 instead of only port 1, so the Transfer Pak can sit in
+  a spare port while port 1 drives the menus.
 
 ### Changed
 
@@ -14,19 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the `trpak_version()` / `trpak_version_string()` accessors.
 - **Footer:** The version line now also shows the libtrpak version, printed from
   `trpak_version_string()`.
-
-### Note
-
-- This dependency update is not released yet: it must first be validated on real
-  Transfer Pak hardware by a responsible maintainer.
-
-## [1.0.2] - 2026-08-20
-
-### Added
-
-- **Transfer Pak detection on all controller ports:** `Info` now probes
-  controller ports 1-4 instead of only port 1, so the Transfer Pak can sit in
-  a spare port while port 1 drives the menus.
 
 ### Fixed
 
