@@ -5,6 +5,7 @@
 #include "ui.h"
 
 #include <libdragon.h>
+#include <libcart/cart.h>
 
 #include <stdio.h>
 
@@ -25,10 +26,31 @@ void ui_draw_header(void)
     printf("+--------------------------------------+\n");
 }
 
+const char* ui_cart_name(){
+	switch (cart_type)
+	{
+		case CART_CI:
+			return "64drive";
+			break;
+		case CART_ED:
+			return "Everdrive 64";
+			break;
+		case CART_EDX:
+			return "Everdrive 64X";
+			break;
+		case CART_SC:
+			return "SC64";
+			break;
+		default:
+			return "Unknown";
+			break;
+	}
+}
+
 void ui_draw_footer(const char *controls)
 {
     printf("\n%s\n", controls);
-    printf("%s | SC64 + Transfer Pak v%s\n", APP_AUTHOR, APP_VERSION);
+    printf("%s | %s + Transfer Pak v%s\n", APP_AUTHOR, ui_cart_name(), APP_VERSION);
     printf("libtrpak v%s\n", trpak_version_string());
 }
 
