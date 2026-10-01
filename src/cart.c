@@ -120,6 +120,8 @@ const char *cart_mapper_name(unsigned char mapper)
     case TRPAK_MAPPER_HUC3: return "HuC3";
     case TRPAK_MAPPER_HUC1: return "HuC1";
     case TRPAK_MAPPER_MBC4: return "MBC4";
+    case TRPAK_MAPPER_MBC6: return "MBC6";
+    case TRPAK_MAPPER_MBC7: return "MBC7";
     default: return "Unknown";
     }
 }
